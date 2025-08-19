@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # --- Configuration from Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '5895491379')
+ADMIN_IDS_STR = os.environ.get('5895491379')
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip().isdigit()]
 
 if not TELEGRAM_BOT_TOKEN:
@@ -1454,3 +1454,4 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
+
