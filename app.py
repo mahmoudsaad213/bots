@@ -338,7 +338,7 @@ def generate_business_name():
         f"{random.choice(business_prefixes)}{random_num}",
         f"M{random_num} {random.choice(business_suffixes)}",
         f"{random.choice(business_prefixes)} {random_num}",
-        f"Company {random.num}"
+        f"Company {random_num}" # <--- CORRECTED LINE
     ]
     return random.choice(name_formats)
 
@@ -966,3 +966,4 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
+
