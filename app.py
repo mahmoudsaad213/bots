@@ -881,11 +881,9 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
 async def send_telegram_message(update: Update, text: str, parse_mode: str = None, reply_markup: InlineKeyboardMarkup = None, silent: bool = False) -> None:
     """Helper function to send messages to Telegram."""
     try:
-        # Ensure text is escaped if MarkdownV2 is used and not already escaped
+        # Ensure text is escaped if MarkdownV2 is used
         if parse_mode == 'MarkdownV2':
-            # Only escape if it's not already escaped (simple check for common chars)
-            if not re.search(r'\\([_*\[\]()~`>#+\-=|{}.!])', text):
-                text = escape_markdown(text, version=2)
+            text = escape_markdown(text, version=2) # <--- قم بإزالة الشرط هنا
         
         if update.callback_query:
             await update.callback_query.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
@@ -893,6 +891,7 @@ async def send_telegram_message(update: Update, text: str, parse_mode: str = Non
             await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e} - Text: {text[:100]}...")
+
 
 def get_main_keyboard(user_status: str = 'idle') -> InlineKeyboardMarkup:
     """Returns the main keyboard for users based on their status."""
@@ -1234,6 +1233,13 @@ async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     users_on_page = users[start_index:end_index]
 
     message_text = f"لوحة تحكم المشرف \\(المستخدمون: {total_users}\\)\n\n"
+    message_text += (
+    f"\\- ID: `{user['user_id']}` {admin_status}\n" # <--- هنا المشكلة
+    f"  الاشتراك: {sub_status}\n"
+    f"  الأعمال: {user['businesses_created_count']}\n"
+    f"  الحالة: {user['status']}\n"
+    f"  تاريخ الانضمام: {user['created_at'].strftime('%Y-%m-%d')}\n\n"
+)
     if not users_on_page:
         message_text += "لا يوجد مستخدمون لعرضهم\\."
     else:
@@ -1454,5 +1460,6 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
+
 
 
