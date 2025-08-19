@@ -43,8 +43,6 @@ if not DATABASE_URL:
 user_cookies_storage = {} 
 # Stores the current running task for each user to manage start/stop
 user_tasks = {} 
-# Stores state for multi-step admin commands
-admin_command_states = {}
 
 # --- Database Connection Pool ---
 conn_pool = None
@@ -84,7 +82,6 @@ def init_db():
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                first_name TEXT, -- New: Store user's first name
                 is_admin BOOLEAN DEFAULT FALSE,
                 subscription_end_date DATE,
                 tempmail_api_key TEXT,
@@ -94,28 +91,13 @@ def init_db():
                 businesses_created_count INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'idle', -- idle, running, paused
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP -- New: Track last active time
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             DROP TRIGGER IF EXISTS update_users_updated_at ON users;
             CREATE TRIGGER update_users_updated_at
             BEFORE UPDATE ON users
             FOR EACH ROW
             EXECUTE FUNCTION update_updated_at_column();
-        """)
-
-        # Add new columns if they don't exist
-        cur.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='first_name') THEN
-                    ALTER TABLE users ADD COLUMN first_name TEXT;
-                END IF;
-                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_active') THEN
-                    ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-                END IF;
-            END
-            $$;
         """)
 
         # Table for storing created businesses and their invitation links
@@ -148,25 +130,21 @@ def get_user(user_id: int) -> dict | None:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT user_id, first_name, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status, created_at, updated_at, last_active FROM users WHERE user_id = %s",
+            "SELECT user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status FROM users WHERE user_id = %s",
             (user_id,)
         )
         row = cur.fetchone()
         if row:
             return {
                 "user_id": row[0],
-                "first_name": row[1],
-                "is_admin": row[2],
-                "subscription_end_date": row[3],
-                "tempmail_api_key": row[4],
-                "current_email": row[5],
-                "email_created_at": row[6],
-                "processed_uuids": set(row[7]) if row[7] else set(),
-                "businesses_created_count": row[8],
-                "status": row[9],
-                "created_at": row[10],
-                "updated_at": row[11],
-                "last_active": row[12]
+                "is_admin": row[1],
+                "subscription_end_date": row[2],
+                "tempmail_api_key": row[3],
+                "current_email": row[4],
+                "email_created_at": row[5],
+                "processed_uuids": set(row[6]) if row[6] else set(),
+                "businesses_created_count": row[7],
+                "status": row[8]
             }
         return None
     except Exception as e:
@@ -176,7 +154,7 @@ def get_user(user_id: int) -> dict | None:
         if conn:
             release_db_connection(conn)
 
-def create_or_update_user(user_id: int, first_name: str = None, is_admin: bool = False, subscription_end_date: date = None, tempmail_api_key: str = None, current_email: str = None, email_created_at: date = None, processed_uuids: set = None, businesses_created_count: int = 0, status: str = 'idle'):
+def create_or_update_user(user_id: int, is_admin: bool = False, subscription_end_date: date = None, tempmail_api_key: str = None, current_email: str = None, email_created_at: date = None, processed_uuids: set = None, businesses_created_count: int = 0, status: str = 'idle'):
     """Creates or updates user data in the database."""
     conn = None
     try:
@@ -188,22 +166,20 @@ def create_or_update_user(user_id: int, first_name: str = None, is_admin: bool =
 
         cur.execute(
             """
-            INSERT INTO users (user_id, first_name, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status, last_active)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            INSERT INTO users (user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
-                first_name = COALESCE(EXCLUDED.first_name, users.first_name),
                 is_admin = EXCLUDED.is_admin,
-                subscription_end_date = COALESCE(EXCLUDED.subscription_end_date, users.subscription_end_date),
-                tempmail_api_key = COALESCE(EXCLUDED.tempmail_api_key, users.tempmail_api_key),
+                subscription_end_date = EXCLUDED.subscription_end_date,
+                tempmail_api_key = COALESCE(EXCLUDED.tempmail_api_key, users.tempmail_api_key), -- Only update if EXCLUDED is not NULL
                 current_email = COALESCE(EXCLUDED.current_email, users.current_email),
                 email_created_at = COALESCE(EXCLUDED.email_created_at, users.email_created_at),
                 processed_uuids = COALESCE(EXCLUDED.processed_uuids, users.processed_uuids),
                 businesses_created_count = EXCLUDED.businesses_created_count,
                 status = EXCLUDED.status,
-                updated_at = CURRENT_TIMESTAMP,
-                last_active = CURRENT_TIMESTAMP;
+                updated_at = CURRENT_TIMESTAMP;
             """,
-            (user_id, first_name, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, uuids_list, businesses_created_count, status)
+            (user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, uuids_list, businesses_created_count, status)
         )
         conn.commit()
         logger.info(f"User {user_id} data saved/updated.")
@@ -222,7 +198,7 @@ def update_user_status(user_id: int, status: str):
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE users SET status = %s, updated_at = CURRENT_TIMESTAMP, last_active = CURRENT_TIMESTAMP WHERE user_id = %s",
+            "UPDATE users SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
             (status, user_id)
         )
         conn.commit()
@@ -262,7 +238,6 @@ def update_user_tempmail_config(user_id: int, api_key: str = None, email: str = 
             return # Nothing to update
 
         set_clauses.append("updated_at = CURRENT_TIMESTAMP")
-        set_clauses.append("last_active = CURRENT_TIMESTAMP")
         params.append(user_id)
 
         query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = %s"
@@ -284,7 +259,7 @@ def increment_businesses_created_count(user_id: int):
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "UPDATE users SET businesses_created_count = businesses_created_count + 1, updated_at = CURRENT_TIMESTAMP, last_active = CURRENT_TIMESTAMP WHERE user_id = %s",
+            "UPDATE users SET businesses_created_count = businesses_created_count + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
             (user_id,)
         )
         conn.commit()
@@ -304,45 +279,22 @@ def get_all_users() -> list[dict]:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT user_id, first_name, is_admin, subscription_end_date, businesses_created_count, status, created_at, last_active FROM users ORDER BY created_at DESC"
+            "SELECT user_id, is_admin, subscription_end_date, businesses_created_count, status, created_at FROM users ORDER BY created_at DESC"
         )
         users_data = []
         for row in cur.fetchall():
             users_data.append({
                 "user_id": row[0],
-                "first_name": row[1],
-                "is_admin": row[2],
-                "subscription_end_date": row[3],
-                "businesses_created_count": row[4],
-                "status": row[5],
-                "created_at": row[6],
-                "last_active": row[7]
+                "is_admin": row[1],
+                "subscription_end_date": row[2],
+                "businesses_created_count": row[3],
+                "status": row[4],
+                "created_at": row[5]
             })
         return users_data
     except Exception as e:
         logger.error(f"Error getting all users: {e}")
         return []
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-def delete_user(user_id: int):
-    """Deletes a user and their associated businesses from the database."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Delete associated businesses first due to foreign key constraint
-        cur.execute("DELETE FROM user_businesses WHERE user_id = %s", (user_id,))
-        cur.execute("DELETE FROM users WHERE user_id = %s", (user_id,))
-        conn.commit()
-        logger.info(f"User {user_id} and their businesses deleted successfully.")
-        return True
-    except Exception as e:
-        logger.error(f"Error deleting user {user_id}: {e}")
-        if conn:
-            conn.rollback()
-        return False
     finally:
         if conn:
             release_db_connection(conn)
@@ -441,16 +393,6 @@ def extract_invitation_link(email_body):
     if match:
         return match.group(0)
     return None
-
-def shorten_url(url: str) -> str:
-    """
-    A placeholder for a URL shortening function.
-    In a real scenario, you'd integrate with a service like Bitly, TinyURL, etc.
-    For this example, we'll just truncate it.
-    """
-    if len(url) > 50: # Arbitrary length for shortening
-        return url[:30] + "..." + url[-17:] # Keep start and end
-    return url
 
 async def wait_for_invitation_email(user_id: int, email_address: str, api_key: str, update: Update, timeout=300):
     """Wait for invitation email and extract the link, processing only new emails."""
@@ -934,6 +876,11 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
         return False, biz_id, None, "Business created but setup failed."
 # --- Telegram Bot Functions ---
 
+# Global variable to store user's cookies for the current session (in-memory, not persistent)
+user_cookies_storage = {} 
+# Stores the current running task for each user to manage start/stop
+user_tasks = {} 
+
 async def send_telegram_message(update: Update, text: str, parse_mode: str = None, reply_markup: InlineKeyboardMarkup = None, silent: bool = False) -> None:
     """Helper function to send messages to Telegram."""
     try:
@@ -943,26 +890,28 @@ async def send_telegram_message(update: Update, text: str, parse_mode: str = Non
         
         if update.callback_query:
             await update.callback_query.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
-        elif update.message:
-            await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
         else:
-            # Fallback for cases where neither message nor callback_query is present (e.g., direct bot.send_message)
-            # This might need context.bot.send_message(chat_id=user_id, ...)
-            logger.warning("send_telegram_message called without update.message or update.callback_query. Cannot reply directly.")
+            await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e} - Text: {text[:100]}...")
 
 async def get_main_keyboard(user_id: int, user_status: str = 'idle') -> InlineKeyboardMarkup:
-    """Returns the main keyboard for users based on their status and admin status."""
+    """Returns the main keyboard for users based on their status."""
     keyboard = []
-    
-    # User-specific buttons (Start/Stop)
     if user_status == 'idle' or user_status == 'paused':
-        keyboard.append([InlineKeyboardButton("🚀 Start", callback_data="start_creation")])
+        keyboard.append([InlineKeyboardButton("🚀 Start New Session", callback_data="start_creation")])
     if user_status == 'running':
-        keyboard.append([InlineKeyboardButton("🛑 Stop", callback_data="stop_creation")]) # Renamed from pause
+        keyboard.append([InlineKeyboardButton("⏸️ Pause", callback_data="pause_creation")])
+    if user_status == 'paused':
+        keyboard.append([InlineKeyboardButton("▶️ Resume", callback_data="resume_creation")])
+    
+    keyboard.append([
+        InlineKeyboardButton("⬇️ Download Invitations", callback_data="download_invitations"),
+        InlineKeyboardButton("🆔 Download IDs", callback_data="download_ids")
+    ])
+    keyboard.append([InlineKeyboardButton("🔄 Refresh Panel", callback_data="refresh_panel")])
 
-    # Admin Panel button if user is an admin
+    # Add Admin Panel button if user is an admin
     user_data = get_user(user_id)
     if user_data and user_data.get('is_admin'):
         keyboard.append([InlineKeyboardButton("⚙️ Admin Panel", callback_data="show_admin_panel")])
@@ -970,14 +919,14 @@ async def get_main_keyboard(user_id: int, user_status: str = 'idle') -> InlineKe
     return InlineKeyboardMarkup(keyboard)
 
 async def send_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the user's main control panel (Welcome Screen)."""
+    """Sends the user's main control panel."""
     user_id = update.effective_user.id
     user_data = get_user(user_id)
     
     if not user_data:
         # This should ideally not happen if create_or_update_user is called on /start
         # but as a fallback, create a basic entry
-        create_or_update_user(user_id, first_name=update.effective_user.first_name)
+        create_or_update_user(user_id)
         user_data = get_user(user_id) # Re-fetch to get default values
 
     status_text = {
@@ -994,12 +943,10 @@ async def send_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             sub_status = "Expired"
 
-    user_name = user_data.get('first_name') or f"User {user_id}"
-
     message_text = (
-        f"👋 Welcome, {escape_markdown(user_name, version=2)}!\n\n"
+        f"👋 Welcome to your control panel\\!\n\n"
         f"✨ *Subscription Status:* {sub_status}\n"
-        f"🆔 *Your ID:* `{user_id}`\n"
+        f"📧 *Your Daily TempMail:* `{user_data['current_email'] or 'Not set'}`\n"
         f"📊 *Businesses Created:* `{user_data['businesses_created_count']}`\n"
         f"⚙️ *Bot Status:* `{status_text}`\n\n"
         f"Please send your Facebook cookies as a text message to start working\\."
@@ -1014,13 +961,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_data = get_user(user_id)
     if not user_data:
         is_admin_status = user_id in ADMIN_IDS
-        create_or_update_user(user_id, first_name=update.effective_user.first_name, is_admin=is_admin_status)
+        create_or_update_user(user_id, is_admin=is_admin_status)
         if is_admin_status:
             logger.info(f"User {user_id} set as admin upon start.")
-    else: # If user exists, ensure admin status is up-to-date and update first_name
-        if user_data['is_admin'] != (user_id in ADMIN_IDS) or user_data['first_name'] != update.effective_user.first_name:
-            create_or_update_user(user_id, first_name=update.effective_user.first_name, is_admin=(user_id in ADMIN_IDS))
-            logger.info(f"User {user_id} admin status or first_name updated.")
+    else: # If user exists, ensure admin status is up-to-date
+        if user_data['is_admin'] != (user_id in ADMIN_IDS):
+            create_or_update_user(user_id, is_admin=(user_id in ADMIN_IDS))
+            logger.info(f"User {user_id} admin status updated.")
 
     await send_user_panel(update, context)
 
@@ -1028,11 +975,6 @@ async def handle_cookies_message(update: Update, context: ContextTypes.DEFAULT_T
     """Handles incoming messages, expecting them to be cookies."""
     user_id = update.effective_user.id
     cookies_input_str = update.message.text.strip()
-
-    # Check if the message is part of an admin command state
-    if user_id in admin_command_states:
-        await handle_admin_input(update, context)
-        return
 
     if cookies_input_str:
         try:
@@ -1085,24 +1027,62 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         task = context.application.create_task(create_business_loop(update, context))
         user_tasks[user_id] = task # Store the task to be able to cancel it
         
-    elif action == "stop_creation": # Renamed from pause_creation
+    elif action == "pause_creation":
         if user_data['status'] != 'running':
-            await send_telegram_message(update, "Bot is not running to be stopped\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "Bot is not running to be paused\\.", parse_mode='MarkdownV2')
             return
         
-        update_user_status(user_id, 'idle') # Changed to idle from paused
+        update_user_status(user_id, 'paused')
         if user_id in user_tasks and not user_tasks[user_id].done():
             user_tasks[user_id].cancel()
-            await send_telegram_message(update, "🛑 Business creation process stopped\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'idle'))
+            await send_telegram_message(update, "⏸️ Business creation process paused\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'paused'))
         else:
-            await send_telegram_message(update, "Bot is not actively running to be stopped\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'idle'))
+            await send_telegram_message(update, "Bot is not actively running to be paused\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'paused'))
 
+    elif action == "resume_creation":
+        if user_data['status'] != 'paused':
+            await send_telegram_message(update, "Bot is not paused to be resumed\\.", parse_mode='MarkdownV2')
+            return
+        
+        update_user_status(user_id, 'running')
+        await send_telegram_message(update, "▶️ Resuming business creation process\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'running'))
+        task = context.application.create_task(create_business_loop(update, context))
+        user_tasks[user_id] = task
+
+    elif action == "download_invitations":
+        businesses = get_user_businesses(user_id)
+        if not businesses:
+            await send_telegram_message(update, "No invitations available for download yet\\.", parse_mode='MarkdownV2')
+            return
+        
+        file_content = "Business ID,Invitation Link,Created At\n"
+        for biz in businesses:
+            file_content += f"{biz['biz_id']},{biz['invitation_link']},{biz['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        file_name = f"invitations_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
+        await send_telegram_message(update, "✅ Invitations file sent successfully\\.", parse_mode='MarkdownV2')
+
+    elif action == "download_ids":
+        businesses = get_user_businesses(user_id)
+        if not businesses:
+            await send_telegram_message(update, "No business IDs available for download yet\\.", parse_mode='MarkdownV2')
+            return
+        
+        file_content = "Business ID,Created At\n"
+        for biz in businesses:
+            file_content += f"{biz['biz_id']},{biz['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        file_name = f"business_ids_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
+        await send_telegram_message(update, "✅ Business IDs file sent successfully\\.", parse_mode='MarkdownV2')
+
+    elif action == "refresh_panel":
+        await send_user_panel(update, context)
+    
     elif action == "show_admin_panel":
         await send_admin_panel(update, context)
-    
-    # Admin callback queries (new structure)
-    elif action.startswith("admin_"):
-        await handle_admin_callback_query(update, context)
+
 
 async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[str, str] | tuple[None, None]:
     """
@@ -1112,7 +1092,7 @@ async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[
     user_data = get_user(user_id)
 
     if not user_data or not user_data.get("tempmail_api_key"):
-        await send_telegram_message(update, "❌ Please set your TempMail API key first\\. Contact the admin to set it for you\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Please set your TempMail API key first\\. Contact the admin or use the /set_tempmail_api_key command if available to you\\.", parse_mode='MarkdownV2')
         return None, None
 
     api_key = user_data["tempmail_api_key"]
@@ -1199,10 +1179,9 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
                 increment_businesses_created_count(user_id)
                 
                 message = (
-                    f"✅ Account Created\\!\n"
-                    f"🆔 *Your ID:* `{user_id}`\n" # Added Telegram user ID
+                    f"🎉 Business created successfully\\!\n"
                     f"📊 \\*Business ID:\\* `{escape_markdown(biz_id, version=2)}`\n"
-                    f"🔗 \\*Invitation Code:\\* `{escape_markdown(shorten_url(invitation_link), version=2)}`" # Shortened URL
+                    f"🔗 \\*Invitation Link:\\* {escape_markdown(invitation_link, version=2)}"
                 )
                 await send_telegram_message(update, message, parse_mode='MarkdownV2')
                 logger.info(f"User {user_id}: Business #{current_businesses_count} created successfully on attempt {attempt}.")
@@ -1241,13 +1220,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "I am a bot for creating Facebook Business Manager accounts\\.\n\n"
         "Steps:\n"
         "1\\. Send me your Facebook cookies as a single line of text\\.\n"
-        "2\\. Press the \"Start\" button in the control panel\\.\n\n"
+        "2\\. Press the \"Start New Session\" button in the control panel\\.\n\n"
         "Note: The process might take a few minutes per business and includes retries for robustness\\."
         "If you need to set your TempMail API key, please contact the admin\\."
         , parse_mode='MarkdownV2'
     )
-
-# --- Admin Interface (New Implementation) ---
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin panel command."""
@@ -1260,19 +1237,58 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await send_admin_panel(update, context)
 
-async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the main admin control panel."""
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Subscriber", callback_data="admin_add_subscriber")],
-        [InlineKeyboardButton("➖ Remove Subscriber", callback_data="admin_remove_subscriber")],
-        [InlineKeyboardButton("👥 Get Subscribers Data", callback_data="admin_get_subscribers_data")],
-        [InlineKeyboardButton("📢 Send Message to All", callback_data="admin_broadcast_message")],
-        [InlineKeyboardButton("🎁 Gift Days", callback_data="admin_gift_days")] # New Gift Days button
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_telegram_message(update, "⚙️ *Admin Control Panel*", parse_mode='MarkdownV2', reply_markup=reply_markup)
+async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, user_page: int = 0) -> None:
+    """Sends the admin control panel."""
+    users = get_all_users()
+    total_users = len(users)
+    users_per_page = 10
+    total_pages = (total_users + users_per_page - 1) // users_per_page
+    
+    start_index = user_page * users_per_page
+    end_index = start_index + users_per_page
+    users_on_page = users[start_index:end_index]
 
-async def handle_admin_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message_text = f"Admin Control Panel \\(Users: {total_users}\\)\n\n"
+    if not users_on_page:
+        message_text += "No users to display\\."
+    else:
+        for user_info in users_on_page: # Renamed 'user' to 'user_info' to avoid conflict
+            sub_status = "Inactive"
+            if user_info['subscription_end_date']:
+                if user_info['subscription_end_date'] >= date.today():
+                    days_left = (user_info['subscription_end_date'] - date.today()).days
+                    sub_status = f"Active \\({days_left} days\\)"
+                else:
+                    sub_status = "Expired"
+            
+            admin_status = " \\(Admin\\)" if user_info['is_admin'] else ""
+            message_text += (
+                f"\\- ID: `{user_info['user_id']}` {admin_status}\n"
+                f"  Subscription: {sub_status}\n"
+                f"  Businesses: {user_info['businesses_created_count']}\n"
+                f"  Status: {user_info['status']}\n"
+                f"  Joined: {user_info['created_at'].strftime('%Y-%m-%d')}\n\n"
+            )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Activate Subscription", callback_data="admin_activate_sub")],
+        [InlineKeyboardButton("🔑 Set TempMail API", callback_data="admin_set_tempmail_api")],
+        [InlineKeyboardButton("📊 General Stats", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_refresh_panel")]
+    ]
+
+    # Pagination buttons
+    pagination_buttons = []
+    if user_page > 0:
+        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"admin_users_page_{user_page - 1}"))
+    if user_page < total_pages - 1:
+        pagination_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_users_page_{user_page + 1}"))
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+
+    await send_telegram_message(update, message_text, parse_mode='MarkdownV2', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles admin panel button presses."""
     query = update.callback_query
     await query.answer()
@@ -1286,255 +1302,119 @@ async def handle_admin_callback_query(update: Update, context: ContextTypes.DEFA
 
     action = query.data
 
-    if action == "admin_add_subscriber":
-        admin_command_states[user_id] = {"state": "add_subscriber_id"}
-        await send_telegram_message(update, "Please send the *User ID* of the subscriber to add\\.", parse_mode='MarkdownV2')
+    if action == "admin_activate_sub":
+        await send_telegram_message(update, "To activate subscription, send command in format:\n`/activate_sub <user_id> <days>`\nExample: `/activate_sub 123456789 30` (for 30 days)", parse_mode='MarkdownV2')
     
-    elif action == "admin_remove_subscriber":
-        admin_command_states[user_id] = {"state": "remove_subscriber_id"}
-        await send_telegram_message(update, "Please send the *User ID or @username* of the subscriber to remove\\.", parse_mode='MarkdownV2')
+    elif action == "admin_set_tempmail_api":
+        await send_telegram_message(update, "To set TempMail API key for a user, send command in format:\n`/set_user_tempmail_api <user_id> <api_key>`\nExample: `/set_user_tempmail_api 123456789 131|nLYDwolNM8987MZX7s0At3muNsbK7S7tJ3nKrrvu1677734a`", parse_mode='MarkdownV2')
 
-    elif action == "admin_get_subscribers_data":
-        await send_subscribers_list(update, context)
+    elif action == "admin_stats":
+        total_users = len(get_all_users())
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT SUM(businesses_created_count) FROM users;")
+            total_businesses = cur.fetchone()[0] or 0
+            
+            cur.execute("SELECT COUNT(*) FROM users WHERE subscription_end_date >= CURRENT_DATE;")
+            active_subscriptions = cur.fetchone()[0] or 0
 
-    elif action.startswith("admin_show_user_"):
-        target_user_id = int(action.split('_')[-1])
-        await show_single_user_details(update, context, target_user_id)
+            message = (
+                f"📊 *General Statistics:*\n"
+                f"  Total Users: `{total_users}`\n"
+                f"  Active Subscriptions: `{active_subscriptions}`\n"
+                f"  Total Businesses Created: `{total_businesses}`"
+            )
+            await send_telegram_message(update, message, parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.error(f"Error getting admin stats: {e}")
+            await send_telegram_message(update, f"❌ Error fetching statistics: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
+        finally:
+            if conn:
+                release_db_connection(conn)
 
-    elif action == "admin_broadcast_message":
-        admin_command_states[user_id] = {"state": "broadcast_message"}
-        await send_telegram_message(update, "Please send the message you want to broadcast to all subscribers\\.", parse_mode='MarkdownV2')
-
-    elif action == "admin_gift_days":
-        admin_command_states[user_id] = {"state": "gift_days_id"}
-        await send_telegram_message(update, "Please send the *User ID* to gift days to\\.", parse_mode='MarkdownV2')
-
-    elif action == "admin_back_to_panel":
-        if user_id in admin_command_states:
-            del admin_command_states[user_id]
+    elif action == "admin_refresh_panel":
         await send_admin_panel(update, context)
+    
+    elif action.startswith("admin_users_page_"):
+        page = int(action.split('_')[-1])
+        await send_admin_panel(update, context, user_page=page)
 
-async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles text input for multi-step admin commands."""
+async def activate_subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to activate user subscription."""
     user_id = update.effective_user.id
-    if user_id not in admin_command_states:
-        return # Not in an admin command state
-
-    state_info = admin_command_states[user_id]
-    current_state = state_info["state"]
-    input_text = update.message.text.strip()
-
-    try:
-        if current_state == "add_subscriber_id":
-            target_user_id = int(input_text)
-            state_info["target_user_id"] = target_user_id
-            state_info["state"] = "add_subscriber_duration"
-            await send_telegram_message(update, f"User ID `{target_user_id}` received\\. Now, please send the *subscription duration in days*\\.", parse_mode='MarkdownV2')
-        
-        elif current_state == "add_subscriber_duration":
-            target_user_id = state_info["target_user_id"]
-            days = int(input_text)
-            
-            target_user_data = get_user(target_user_id)
-            if not target_user_data:
-                create_or_update_user(target_user_id) # Create if not exists
-                target_user_data = get_user(target_user_id)
-
-            current_end_date = target_user_data['subscription_end_date'] or date.today()
-            if current_end_date < date.today():
-                current_end_date = date.today()
-
-            new_end_date = current_end_date + timedelta(days=days)
-            create_or_update_user(target_user_id, subscription_end_date=new_end_date)
-
-            # Placeholder for "Send API key to email"
-            await send_telegram_message(update, f"✅ Subscriber `{target_user_id}` added/updated\\. Subscription active until `{new_end_date.strftime('%Y-%m-%d')}`\\.\n\n_Note: Sending API key to email is not implemented in this bot version\\._", parse_mode='MarkdownV2')
-            
-            # Send welcome message to target user
-            try:
-                await context.bot.send_message(chat_id=target_user_id, text=f"🎉 Your subscription has been activated successfully until `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
-            except Exception as e:
-                logger.warning(f"Could not notify user {target_user_id} about subscription activation: {e}")
-            
-            del admin_command_states[user_id]
-            await send_admin_panel(update, context)
-
-        elif current_state == "remove_subscriber_id":
-            target_identifier = input_text
-            target_user_id = None
-            
-            if target_identifier.isdigit():
-                target_user_id = int(target_identifier)
-            elif target_identifier.startswith('@'):
-                # Attempt to find user by username (requires bot to store usernames, which it currently doesn't)
-                # For now, we'll assume user ID is preferred or handle this as an error.
-                await send_telegram_message(update, "Finding user by @username is not supported\\. Please provide a numeric User ID\\.", parse_mode='MarkdownV2')
-                del admin_command_states[user_id]
-                await send_admin_panel(update, context)
-                return
-            
-            if target_user_id:
-                target_user_data = get_user(target_user_id)
-                if target_user_data:
-                    state_info["target_user_id"] = target_user_id
-                    state_info["state"] = "remove_subscriber_confirm"
-                    keyboard = [[InlineKeyboardButton("Yes, Delete", callback_data=f"admin_confirm_delete_{target_user_id}"), InlineKeyboardButton("No, Cancel", callback_data="admin_back_to_panel")]]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-                    await send_telegram_message(update, f"Are you sure you want to delete user `{target_user_id}` \\({target_user_data.get('first_name', 'N/A')}\\) and all their data\\?", parse_mode='MarkdownV2', reply_markup=reply_markup)
-                else:
-                    await send_telegram_message(update, f"User `{target_user_id}` not found\\.", parse_mode='MarkdownV2')
-                    del admin_command_states[user_id]
-                    await send_admin_panel(update, context)
-            else:
-                await send_telegram_message(update, "Invalid User ID provided\\.", parse_mode='MarkdownV2')
-                del admin_command_states[user_id]
-                await send_admin_panel(update, context)
-
-        elif current_state == "broadcast_message":
-            message_to_broadcast = input_text
-            all_users = get_all_users()
-            success_count = 0
-            for user_info in all_users:
-                try:
-                    await context.bot.send_message(chat_id=user_info['user_id'], text=f"📢 *Admin Broadcast:*\n\n{escape_markdown(message_to_broadcast, version=2)}", parse_mode='MarkdownV2')
-                    success_count += 1
-                    time.sleep(0.1) # Small delay to avoid rate limits
-                except Exception as e:
-                    logger.warning(f"Failed to send broadcast to user {user_info['user_id']}: {e}")
-            
-            await send_telegram_message(update, f"✅ Message broadcasted to {success_count} users\\.", parse_mode='MarkdownV2')
-            del admin_command_states[user_id]
-            await send_admin_panel(update, context)
-
-        elif current_state == "gift_days_id":
-            target_user_id = int(input_text)
-            state_info["target_user_id"] = target_user_id
-            state_info["state"] = "gift_days_duration"
-            await send_telegram_message(update, f"User ID `{target_user_id}` received\\. Now, please send the *number of gift days*\\.", parse_mode='MarkdownV2')
-
-        elif current_state == "gift_days_duration":
-            target_user_id = state_info["target_user_id"]
-            days = int(input_text)
-
-            target_user_data = get_user(target_user_id)
-            if not target_user_data:
-                create_or_update_user(target_user_id) # Create if not exists
-                target_user_data = get_user(target_user_id)
-
-            current_end_date = target_user_data['subscription_end_date'] or date.today()
-            if current_end_date < date.today():
-                current_end_date = date.today() # Start from today if expired or non-subscriber
-
-            new_end_date = current_end_date + timedelta(days=days)
-            create_or_update_user(target_user_id, subscription_end_date=new_end_date)
-
-            await send_telegram_message(update, f"✅ Gift of `{days}` days applied to user `{target_user_id}`\\. New subscription end date: `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
-            
-            try:
-                await context.bot.send_message(chat_id=target_user_id, text=f"🎁 You have received a gift of `{days}` subscription days\\! Your new subscription end date is `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
-            except Exception as e:
-                logger.warning(f"Could not notify user {target_user_id} about gift days: {e}")
-            
-            del admin_command_states[user_id]
-            await send_admin_panel(update, context)
-
-    except ValueError:
-        await send_telegram_message(update, "❌ Invalid input\\. Please enter a valid number\\.", parse_mode='MarkdownV2')
-        del admin_command_states[user_id] # Clear state on error
-        await send_admin_panel(update, context)
-    except Exception as e:
-        logger.error(f"Error in admin command state {current_state} for user {user_id}: {e}")
-        await send_telegram_message(update, f"❌ An unexpected error occurred: {escape_markdown(str(e), version=2)}\\.", parse_mode='MarkdownV2')
-        del admin_command_states[user_id] # Clear state on error
-        await send_admin_panel(update, context)
-
-async def send_subscribers_list(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> None:
-    """Sends a paginated list of subscribers as buttons."""
-    users = get_all_users()
-    users.sort(key=lambda x: x.get('first_name') or str(x['user_id'])) # Sort by name or ID
-
-    users_per_page = 10
-    total_users = len(users)
-    total_pages = (total_users + users_per_page - 1) // users_per_page
-
-    start_index = page * users_per_page
-    end_index = start_index + users_per_page
-    users_on_page = users[start_index:end_index]
-
-    keyboard = []
-    for user_info in users_on_page:
-        user_display_name = user_info.get('first_name') or f"User {user_info['user_id']}"
-        keyboard.append([InlineKeyboardButton(user_display_name, callback_data=f"admin_show_user_{user_info['user_id']}")])
-
-    # Pagination buttons
-    pagination_buttons = []
-    if page > 0:
-        pagination_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_get_subscribers_data_page_{page - 1}"))
-    if page < total_pages - 1:
-        pagination_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_get_subscribers_data_page_{page + 1}"))
-    if pagination_buttons:
-        keyboard.append(pagination_buttons)
-    
-    keyboard.append([InlineKeyboardButton("↩️ Back to Admin Panel", callback_data="admin_back_to_panel")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_telegram_message(update, f"👥 *Subscribers List* (Page {page + 1}/{total_pages if total_pages > 0 else 1})", parse_mode='MarkdownV2', reply_markup=reply_markup)
-
-async def show_single_user_details(update: Update, context: ContextTypes.DEFAULT_TYPE, target_user_id: int) -> None:
-    """Displays detailed information for a single user."""
-    user_data = get_user(target_user_id)
-    if not user_data:
-        await send_telegram_message(update, f"User `{target_user_id}` not found\\.", parse_mode='MarkdownV2')
-        await send_subscribers_list(update, context) # Go back to list
-        return
-
-    sub_status = "Inactive"
-    if user_data['subscription_end_date']:
-        if user_data['subscription_end_date'] >= date.today():
-            days_left = (user_data['subscription_end_date'] - date.today()).days
-            sub_status = f"Active until {user_data['subscription_end_date'].strftime('%Y-%m-%d')} \\({days_left} days left\\)"
-        else:
-            sub_status = "Expired"
-
-    message_text = (
-        f"👤 *User Details:*\n"
-        f"  *ID:* `{user_data['user_id']}`\n"
-        f"  *Name:* {escape_markdown(user_data.get('first_name', 'N/A'), version=2)}\n"
-        f"  *Admin:* {'Yes' if user_data['is_admin'] else 'No'}\n"
-        f"  *Subscription:* {sub_status}\n"
-        f"  *Businesses Created:* `{user_data['businesses_created_count']}`\n"
-        f"  *Status:* `{user_data['status']}`\n"
-        f"  *Joined:* `{user_data['created_at'].strftime('%Y-%m-%d %H:%M:%S')}`\n"
-        f"  *Last Active:* `{user_data['last_active'].strftime('%Y-%m-%d %H:%M:%S')}`\n"
-        f"  *TempMail API Key Set:* {'Yes' if user_data['tempmail_api_key'] else 'No'}\n"
-        f"  *Current TempMail:* `{user_data['current_email'] or 'N/A'}`"
-    )
-
-    keyboard = [[InlineKeyboardButton("↩️ Back to Subscribers List", callback_data="admin_get_subscribers_data")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await send_telegram_message(update, message_text, parse_mode='MarkdownV2', reply_markup=reply_markup)
-
-async def admin_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles confirmation for user deletion."""
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
     if user_id not in ADMIN_IDS:
         await send_telegram_message(update, "❌ You do not have admin privileges\\.", parse_mode='MarkdownV2')
         return
 
-    action_parts = query.data.split('_')
-    target_user_id = int(action_parts[-1])
+    if len(context.args) != 2:
+        await send_telegram_message(update, "❌ Incorrect usage\\. Correct format: `/activate_sub <user_id> <days>`", parse_mode='MarkdownV2')
+        return
 
-    if delete_user(target_user_id):
-        await send_telegram_message(update, f"✅ User `{target_user_id}` and all their data have been successfully deleted\\.", parse_mode='MarkdownV2')
-    else:
-        await send_telegram_message(update, f"❌ Failed to delete user `{target_user_id}`\\. An error occurred\\.", parse_mode='MarkdownV2')
-    
-    if user_id in admin_command_states:
-        del admin_command_states[user_id]
-    await send_admin_panel(update, context) # Return to admin panel
+    try:
+        target_user_id = int(context.args[0])
+        days = int(context.args[1])
+        
+        target_user_data = get_user(target_user_id)
+        if not target_user_data:
+            # Create user if not exists
+            create_or_update_user(target_user_id)
+            target_user_data = get_user(target_user_id) # Re-fetch to get default values
+
+        current_end_date = target_user_data['subscription_end_date'] or date.today()
+        if current_end_date < date.today():
+            current_end_date = date.today() # Start from today if expired
+
+        new_end_date = current_end_date + timedelta(days=days)
+        
+        create_or_update_user(target_user_id, subscription_end_date=new_end_date)
+        await send_telegram_message(update, f"✅ Subscription activated for user `{target_user_id}` until `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+        # Notify target user
+        try:
+            await context.bot.send_message(chat_id=target_user_id, text=f"🎉 Your subscription has been activated successfully until `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id} about subscription activation: {e}")
+
+    except ValueError:
+        await send_telegram_message(update, "❌ Invalid user ID or number of days\\. Please enter valid numbers\\.", parse_mode='MarkdownV2')
+    except Exception as e:
+        logger.error(f"Error activating subscription: {e}")
+        await send_telegram_message(update, f"❌ Error activating subscription: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
+
+async def set_user_tempmail_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to set TempMail API key for a user."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await send_telegram_message(update, "❌ You do not have admin privileges\\.", parse_mode='MarkdownV2')
+        return
+
+    if len(context.args) != 2:
+        await send_telegram_message(update, "❌ Incorrect usage\\. Correct format: `/set_user_tempmail_api <user_id> <api_key>`", parse_mode='MarkdownV2')
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        api_key = context.args[1]
+        
+        target_user_data = get_user(target_user_id)
+        if not target_user_data:
+            # Create user if not exists
+            create_or_update_user(target_user_id)
+            
+        update_user_tempmail_config(target_user_id, api_key=api_key)
+        await send_telegram_message(update, f"✅ TempMail API key set for user `{target_user_id}` successfully\\.", parse_mode='MarkdownV2')
+        # Notify target user
+        try:
+            await context.bot.send_message(chat_id=target_user_id, text="🎉 Your TempMail API key has been set successfully\\.", parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id} about API key setting: {e}")
+
+    except ValueError:
+        await send_telegram_message(update, "❌ Invalid user ID\\. Please enter a valid number\\.", parse_mode='MarkdownV2')
+    except Exception as e:
+        logger.error(f"Error setting user TempMail API key: {e}")
+        await send_telegram_message(update, f"❌ Error setting user TempMail API key: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
 
 async def error_handler(update: object, context: CallbackContext) -> None:
     """Log the error and send a telegram message to notify the user."""
@@ -1571,16 +1451,15 @@ def main_telegram_bot():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("activate_sub", activate_subscription_command))
+    application.add_handler(CommandHandler("set_user_tempmail_api", set_user_tempmail_api_command))
 
-    # Message handler for cookies and admin multi-step inputs
+    # Message handler for cookies (any text message that is not a command)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies_message))
 
     # Callback query handler for inline buttons
-    application.add_handler(CallbackQueryHandler(handle_callback_query, pattern="^(start_creation|stop_creation|show_admin_panel)$"))
-    application.add_handler(CallbackQueryHandler(handle_admin_callback_query, pattern="^admin_"))
-    application.add_handler(CallbackQueryHandler(admin_confirm_delete, pattern="^admin_confirm_delete_"))
-    application.add_handler(CallbackQueryHandler(send_subscribers_list, pattern="^admin_get_subscribers_data_page_"))
-
+    application.add_handler(CallbackQueryHandler(handle_callback_query, pattern="^(start_creation|pause_creation|resume_creation|download_invitations|download_ids|refresh_panel|show_admin_panel)$"))
+    application.add_handler(CallbackQueryHandler(admin_callback_query, pattern="^admin_"))
 
     # Register error handler
     application.add_error_handler(error_handler) 
@@ -1590,5 +1469,4 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
-
 
