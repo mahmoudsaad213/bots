@@ -1,5 +1,4 @@
-FileName: MultipleFiles/app.py
-FileContents: import re
+import re
 import requests
 import random
 import json
@@ -1591,4 +1590,5 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
+
 
