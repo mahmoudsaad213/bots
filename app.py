@@ -6,16 +6,16 @@ import string
 import time
 import logging
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import os
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values
-import psycopg2.pool # Import the pool module
+import psycopg2.pool
 
 # Telegram Bot API imports
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext, CallbackQueryHandler
 from telegram.helpers import escape_markdown
 
 # Configure logging
@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # --- Configuration from Environment Variables ---
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
+ADMIN_IDS_STR = os.environ.get('ADMIN_IDS', '5895491379')
+ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id.strip().isdigit()]
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
@@ -36,6 +38,12 @@ if not DATABASE_URL:
     logger.error("DATABASE_URL environment variable not set!")
     exit(1)
 
+# --- Global Variables ---
+# Stores user's cookies for the current session (in-memory, not persistent)
+user_cookies_storage = {} 
+# Stores the current running task for each user to manage start/stop
+user_tasks = {} 
+
 # --- Database Connection Pool ---
 conn_pool = None
 
@@ -43,8 +51,6 @@ def get_db_connection():
     """Establishes and returns a database connection from the pool."""
     global conn_pool
     if conn_pool is None:
-        # Min 1, Max 10 connections. Adjust as needed.
-        # dsn (Data Source Name) is the DATABASE_URL
         conn_pool = psycopg2.pool.SimpleConnectionPool(1, 10, dsn=DATABASE_URL) 
     return conn_pool.getconn()
 
@@ -60,17 +66,9 @@ def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Function to update 'updated_at' column
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS users_tempmail_config (
-                user_id BIGINT PRIMARY KEY,
-                tempmail_api_key TEXT NOT NULL,
-                current_email TEXT,
-                email_created_at DATE,
-                processed_uuids TEXT[] DEFAULT '{}',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            -- Add a trigger to update 'updated_at' automatically
             CREATE OR REPLACE FUNCTION update_updated_at_column()
             RETURNS TRIGGER AS $$
             BEGIN
@@ -78,13 +76,41 @@ def init_db():
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql;
+        """)
 
-            DROP TRIGGER IF EXISTS update_users_tempmail_config_updated_at ON users_tempmail_config;
-            CREATE TRIGGER update_users_tempmail_config_updated_at
-            BEFORE UPDATE ON users_tempmail_config
+        # Table for users and their TempMail config, subscription, and admin status
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                is_admin BOOLEAN DEFAULT FALSE,
+                subscription_end_date DATE,
+                tempmail_api_key TEXT,
+                current_email TEXT,
+                email_created_at DATE,
+                processed_uuids TEXT[] DEFAULT '{}',
+                businesses_created_count INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'idle', -- idle, running, paused
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            DROP TRIGGER IF EXISTS update_users_updated_at ON users;
+            CREATE TRIGGER update_users_updated_at
+            BEFORE UPDATE ON users
             FOR EACH ROW
             EXECUTE FUNCTION update_updated_at_column();
         """)
+
+        # Table for storing created businesses and their invitation links
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_businesses (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT REFERENCES users(user_id),
+                biz_id TEXT NOT NULL,
+                invitation_link TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
         conn.commit()
         logger.info("Database schema initialized successfully.")
     except Exception as e:
@@ -95,117 +121,227 @@ def init_db():
         if conn:
             release_db_connection(conn)
 
-# --- Database Operations for User TempMail Config ---
+# --- Database Operations for Users ---
 
-def get_user_tempmail_config(user_id: int) -> dict | None:
-    """Retrieves TempMail configuration for a given user_id from the database."""
+def get_user(user_id: int) -> dict | None:
+    """Retrieves user data from the database."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT tempmail_api_key, current_email, email_created_at, processed_uuids FROM users_tempmail_config WHERE user_id = %s",
+            "SELECT user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status FROM users WHERE user_id = %s",
             (user_id,)
         )
         row = cur.fetchone()
         if row:
             return {
-                "api_key": row[0],
-                "current_email": row[1],
-                "email_created_date": row[2], # This will be a datetime.date object
-                "processed_uuids": set(row[3]) if row[3] else set() # Convert list to set for faster lookup
+                "user_id": row[0],
+                "is_admin": row[1],
+                "subscription_end_date": row[2],
+                "tempmail_api_key": row[3],
+                "current_email": row[4],
+                "email_created_at": row[5],
+                "processed_uuids": set(row[6]) if row[6] else set(),
+                "businesses_created_count": row[7],
+                "status": row[8]
             }
         return None
     except Exception as e:
-        logger.error(f"Error getting TempMail config for user {user_id}: {e}")
+        logger.error(f"Error getting user {user_id}: {e}")
         return None
     finally:
         if conn:
             release_db_connection(conn)
 
-def save_user_tempmail_config(user_id: int, api_key: str, current_email: str = None, email_created_date: datetime.date = None, processed_uuids: set = None):
-    """Saves or updates TempMail configuration for a user in the database."""
+def create_or_update_user(user_id: int, is_admin: bool = False, subscription_end_date: date = None, tempmail_api_key: str = None, current_email: str = None, email_created_at: date = None, processed_uuids: set = None, businesses_created_count: int = 0, status: str = 'idle'):
+    """Creates or updates user data in the database."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-
-        # Convert set to list for PostgreSQL array
+        
+        # Ensure processed_uuids is a list for PostgreSQL array
         uuids_list = list(processed_uuids) if processed_uuids else []
 
         cur.execute(
             """
-            INSERT INTO users_tempmail_config (user_id, tempmail_api_key, current_email, email_created_at, processed_uuids)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO users (user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, processed_uuids, businesses_created_count, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
-                tempmail_api_key = EXCLUDED.tempmail_api_key,
-                current_email = EXCLUDED.current_email,
-                email_created_at = EXCLUDED.email_created_at,
-                processed_uuids = EXCLUDED.processed_uuids,
+                is_admin = EXCLUDED.is_admin,
+                subscription_end_date = EXCLUDED.subscription_end_date,
+                tempmail_api_key = COALESCE(EXCLUDED.tempmail_api_key, users.tempmail_api_key), -- Only update if EXCLUDED is not NULL
+                current_email = COALESCE(EXCLUDED.current_email, users.current_email),
+                email_created_at = COALESCE(EXCLUDED.email_created_at, users.email_created_at),
+                processed_uuids = COALESCE(EXCLUDED.processed_uuids, users.processed_uuids),
+                businesses_created_count = EXCLUDED.businesses_created_count,
+                status = EXCLUDED.status,
                 updated_at = CURRENT_TIMESTAMP;
             """,
-            (user_id, api_key, current_email, email_created_date, uuids_list)
+            (user_id, is_admin, subscription_end_date, tempmail_api_key, current_email, email_created_at, uuids_list, businesses_created_count, status)
         )
         conn.commit()
-        logger.info(f"TempMail config saved/updated for user {user_id}.")
+        logger.info(f"User {user_id} data saved/updated.")
     except Exception as e:
-        logger.error(f"Error saving TempMail config for user {user_id}: {e}")
+        logger.error(f"Error saving/updating user {user_id}: {e}")
         if conn:
             conn.rollback()
     finally:
         if conn:
             release_db_connection(conn)
 
-def update_user_email_and_uuids(user_id: int, email: str, email_date: datetime.date, uuids: set):
-    """Updates current_email, email_created_at, and processed_uuids for a user."""
+def update_user_status(user_id: int, status: str):
+    """Updates only the status of a user."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        uuids_list = list(uuids) if uuids else []
         cur.execute(
-            """
-            UPDATE users_tempmail_config
-            SET current_email = %s,
-                email_created_at = %s,
-                processed_uuids = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = %s;
-            """,
-            (email, email_date, uuids_list, user_id)
+            "UPDATE users SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+            (status, user_id)
         )
         conn.commit()
-        logger.info(f"User {user_id} email and UUIDs updated.")
+        logger.info(f"User {user_id} status updated to {status}.")
     except Exception as e:
-        logger.error(f"Error updating email/uuids for user {user_id}: {e}")
+        logger.error(f"Error updating user {user_id} status: {e}")
         if conn:
             conn.rollback()
     finally:
         if conn:
             release_db_connection(conn)
 
-def update_user_processed_uuids(user_id: int, new_uuids: set):
-    """Updates only the processed_uuids for a user."""
+def update_user_tempmail_config(user_id: int, api_key: str = None, email: str = None, email_date: date = None, uuids: set = None):
+    """Updates TempMail related config for a user."""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        uuids_list = list(new_uuids) if new_uuids else []
-        cur.execute(
-            """
-            UPDATE users_tempmail_config
-            SET processed_uuids = %s,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = %s;
-            """,
-            (uuids_list, user_id)
-        )
+        
+        set_clauses = []
+        params = []
+
+        if api_key is not None:
+            set_clauses.append("tempmail_api_key = %s")
+            params.append(api_key)
+        if email is not None:
+            set_clauses.append("current_email = %s")
+            params.append(email)
+        if email_date is not None:
+            set_clauses.append("email_created_at = %s")
+            params.append(email_date)
+        if uuids is not None:
+            set_clauses.append("processed_uuids = %s")
+            params.append(list(uuids)) # Convert set to list for PostgreSQL array
+        
+        if not set_clauses:
+            return # Nothing to update
+
+        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(user_id)
+
+        query = f"UPDATE users SET {', '.join(set_clauses)} WHERE user_id = %s"
+        cur.execute(query, params)
         conn.commit()
-        logger.info(f"User {user_id} processed_uuids updated.")
+        logger.info(f"User {user_id} TempMail config updated.")
     except Exception as e:
-        logger.error(f"Error updating processed_uuids for user {user_id}: {e}")
+        logger.error(f"Error updating TempMail config for user {user_id}: {e}")
         if conn:
             conn.rollback()
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def increment_businesses_created_count(user_id: int):
+    """Increments the businesses_created_count for a user."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET businesses_created_count = businesses_created_count + 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = %s",
+            (user_id,)
+        )
+        conn.commit()
+        logger.info(f"User {user_id} businesses_created_count incremented.")
+    except Exception as e:
+        logger.error(f"Error incrementing businesses_created_count for user {user_id}: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def get_all_users() -> list[dict]:
+    """Retrieves all users from the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, is_admin, subscription_end_date, businesses_created_count, status, created_at FROM users ORDER BY created_at DESC"
+        )
+        users_data = []
+        for row in cur.fetchall():
+            users_data.append({
+                "user_id": row[0],
+                "is_admin": row[1],
+                "subscription_end_date": row[2],
+                "businesses_created_count": row[3],
+                "status": row[4],
+                "created_at": row[5]
+            })
+        return users_data
+    except Exception as e:
+        logger.error(f"Error getting all users: {e}")
+        return []
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+# --- Database Operations for User Businesses ---
+
+def save_user_business(user_id: int, biz_id: str, invitation_link: str):
+    """Saves a created business's details for a user."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO user_businesses (user_id, biz_id, invitation_link) VALUES (%s, %s, %s)",
+            (user_id, biz_id, invitation_link)
+        )
+        conn.commit()
+        logger.info(f"Business {biz_id} saved for user {user_id}.")
+    except Exception as e:
+        logger.error(f"Error saving business {biz_id} for user {user_id}: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def get_user_businesses(user_id: int) -> list[dict]:
+    """Retrieves all businesses created by a specific user."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT biz_id, invitation_link, created_at FROM user_businesses WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,)
+        )
+        businesses = []
+        for row in cur.fetchall():
+            businesses.append({
+                "biz_id": row[0],
+                "invitation_link": row[1],
+                "created_at": row[2]
+            })
+        return businesses
+    except Exception as e:
+        logger.error(f"Error getting businesses for user {user_id}: {e}")
+        return []
     finally:
         if conn:
             release_db_connection(conn)
@@ -263,8 +399,8 @@ async def wait_for_invitation_email(user_id: int, email_address: str, api_key: s
     logger.info(f"🔄 Waiting for invitation email on: {email_address}")
     start_time = time.time()
     
-    user_config = get_user_tempmail_config(user_id)
-    processed_uuids = user_config.get("processed_uuids", set()) if user_config else set()
+    user_data = get_user(user_id)
+    processed_uuids = user_data.get("processed_uuids", set()) if user_data else set()
 
     while time.time() - start_time < timeout:
         emails = get_emails(email_address, api_key)
@@ -287,7 +423,7 @@ async def wait_for_invitation_email(user_id: int, email_address: str, api_key: s
                                 if invitation_link:
                                     logger.info(f"🔗 Invitation link extracted!")
                                     # Update processed UUIDs in DB before returning
-                                    update_user_processed_uuids(user_id, processed_uuids)
+                                    update_user_tempmail_config(user_id, uuids=processed_uuids)
                                     return invitation_link
                             else:
                                 logger.warning(f"⚠️ Could not read full email content or body for UUID: {email_uuid}")
@@ -298,7 +434,7 @@ async def wait_for_invitation_email(user_id: int, email_address: str, api_key: s
         
         # Update processed UUIDs in DB if any new emails were found in this iteration
         if new_uuids_found_in_iteration:
-            update_user_processed_uuids(user_id, processed_uuids)
+            update_user_tempmail_config(user_id, uuids=processed_uuids)
 
         await send_telegram_message(update, f"⏳ Still waiting for invitation email... Checked {len(emails)} emails. Retrying in 10 seconds.", silent=True)
         time.sleep(10)  # Wait 10 seconds before checking again
@@ -323,7 +459,7 @@ def generate_random_email(first_name, last_name):
         f"{first_name.lower()}{random_num}@{random.choice(domains)}",
         f"{first_name.lower()}.{last_name.lower()}@{random.choice(domains)}",
         f"{first_name.lower()}{last_name.lower()}@{random.choice(domains)}",
-        f"{first_name.lower()}_{last_name.lower()}{random.choice(domains)}"
+        f"{first_name.lower()}_{last_name.lower()}@{random.choice(domains)}"
     ]
     return random.choice(email_formats)
 
@@ -338,7 +474,7 @@ def generate_business_name():
         f"{random.choice(business_prefixes)}{random_num}",
         f"M{random_num} {random.choice(business_suffixes)}",
         f"{random.choice(business_prefixes)} {random_num}",
-        f"Company {random_num}" # <--- CORRECTED LINE
+        f"Company {random_num}"
     ]
     return random.choice(name_formats)
 
@@ -510,7 +646,7 @@ async def _get_token(cookies: dict, user_agent: str, update: Update):
         token_value = extract_token_from_response(response)
         
         if not token_value:
-            await send_telegram_message(update, "❌ Token not found. Please check your cookies validity.")
+            await send_telegram_message(update, "❌ Token not found\\. Please check your cookies validity\\.", parse_mode='MarkdownV2')
             return None
         logger.info(f"✅ Token obtained successfully: {token_value[:20]}...")
         time.sleep(2)
@@ -576,11 +712,11 @@ async def _create_initial_business(cookies: dict, token_value: str, user_id: str
                 return biz_id, None
             except KeyError:
                 logger.error("⚠️ Could not extract Business ID from response.")
-                await send_telegram_message(update, "⚠️ Could not extract Business ID from response.")
+                await send_telegram_message(update, "⚠️ Could not extract Business ID from response\\.", parse_mode='MarkdownV2')
                 return None, "Could not extract Business ID from response."
         else:
             logger.warning("⚠️ Unexpected response format during business creation.")
-            await send_telegram_message(update, "⚠️ Unexpected response format during business creation.")
+            await send_telegram_message(update, "⚠️ Unexpected response format during business creation\\.", parse_mode='MarkdownV2')
             return None, "Unexpected response format during business creation."
             
     except json.JSONDecodeError as e:
@@ -646,7 +782,7 @@ async def _setup_review_and_invite(cookies: dict, token_value: str, user_id: str
             return True
         else:
             logger.warning(f"⚠️ Unexpected setup response format: {response_json}")
-            await send_telegram_message(update, "⚠️ Unexpected setup response format.")
+            await send_telegram_message(update, "⚠️ Unexpected setup response format\\.", parse_mode='MarkdownV2')
             return False
             
     except json.JSONDecodeError as e:
@@ -675,8 +811,21 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
         return False, None, None, "No cookies provided."
     
     cookies = cookies_dict
-    user_id = get_user_id_from_cookies(cookies)
+    user_id_from_cookies = get_user_id_from_cookies(cookies) # This is the FB user ID, not Telegram user ID
     
+    # --- Pre-check cookies validity ---
+    try:
+        await send_telegram_message(update, "🔍 Checking cookies validity...", silent=True)
+        response = requests.get('https://business.facebook.com/overview', cookies=cookies, timeout=15, allow_redirects=True)
+        response.raise_for_status()
+        if "login.php" in response.url:
+            await send_telegram_message(update, "❌ Your cookies are invalid or expired\\. Please send new cookies\\.", parse_mode='MarkdownV2')
+            return False, None, None, "Cookies invalid or expired."
+        await send_telegram_message(update, "✅ Cookies appear valid\\.", silent=True, parse_mode='MarkdownV2')
+    except requests.RequestException as e:
+        await send_telegram_message(update, f"❌ Failed to validate cookies: {escape_markdown(str(e), version=2)}\\. Please send new cookies\\.", parse_mode='MarkdownV2')
+        return False, None, None, f"Failed to validate cookies: {e}"
+
     first_name, last_name = generate_random_name()
     email = generate_random_email(first_name, last_name)
     business_name = generate_business_name()
@@ -688,7 +837,7 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
     logger.info(f"Last Name: {last_name}")
     logger.info(f"Email: {email}")
     logger.info(f"Admin Email (TempMail): {admin_email}")
-    logger.info(f"User ID: {user_id}")
+    logger.info(f"User ID (from cookies): {user_id_from_cookies}")
     logger.info("=" * 30)
     
     # --- Step 1: Get Token ---
@@ -698,7 +847,7 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
             
     # --- Step 2: Create Initial Business ---
     biz_id, creation_error = await _create_initial_business(
-        cookies, token_value, user_id, business_name, first_name, last_name, email, user_agent, update
+        cookies, token_value, user_id_from_cookies, business_name, first_name, last_name, email, user_agent, update
     )
 
     if creation_error == "LIMIT_REACHED":
@@ -711,12 +860,12 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
 
     # --- Step 3: Setup Business Review and Invite Admin ---
     setup_success = await _setup_review_and_invite(
-        cookies, token_value, user_id, biz_id, admin_email, update
+        cookies, token_value, user_id_from_cookies, biz_id, admin_email, update
     )
     
     if setup_success:
         logger.info("\n📨 Waiting for invitation email...")
-        invitation_link = await wait_for_invitation_email(user_id, admin_email, tempmail_api_key, update)
+        invitation_link = await wait_for_invitation_email(update.effective_user.id, admin_email, tempmail_api_key, update)
         
         if invitation_link:
             return True, biz_id, invitation_link, None
@@ -729,28 +878,90 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
 
 # --- Telegram Bot Functions ---
 
-# Global variable to store user's cookies for the session (still useful for immediate access after parsing)
-user_cookies_storage = {} # Stores cookies per user_id
-
-async def send_telegram_message(update: Update, text: str, parse_mode: str = None, silent: bool = False) -> None:
+async def send_telegram_message(update: Update, text: str, parse_mode: str = None, reply_markup: InlineKeyboardMarkup = None, silent: bool = False) -> None:
     """Helper function to send messages to Telegram."""
     try:
-        await update.message.reply_text(text, parse_mode=parse_mode, disable_notification=silent)
+        # Ensure text is escaped if MarkdownV2 is used and not already escaped
+        if parse_mode == 'MarkdownV2':
+            # Only escape if it's not already escaped (simple check for common chars)
+            if not re.search(r'\\([_*\[\]()~`>#+\-=|{}.!])', text):
+                text = escape_markdown(text, version=2)
+        
+        if update.callback_query:
+            await update.callback_query.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
+        else:
+            await update.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup, disable_notification=silent)
     except Exception as e:
         logger.error(f"Failed to send Telegram message: {e} - Text: {text[:100]}...")
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message and prompts for cookies."""
-    await send_telegram_message(update,
-        "Welcome to the Facebook Business Creator Bot!\n"
-        "To get started, please send your Facebook cookies as a single line of text.\n"
-        "Example: `datr=...; sb=...; c_user=...; xs=...;`\n\n"
-        "Then, set your TempMail API key using: `/set_tempmail_api_key YOUR_API_KEY`"
+def get_main_keyboard(user_status: str = 'idle') -> InlineKeyboardMarkup:
+    """Returns the main keyboard for users based on their status."""
+    keyboard = []
+    if user_status == 'idle' or user_status == 'paused':
+        keyboard.append([InlineKeyboardButton("🚀 بدء جلسة جديدة", callback_data="start_creation")])
+    if user_status == 'running':
+        keyboard.append([InlineKeyboardButton("⏸️ إيقاف مؤقت", callback_data="pause_creation")])
+    if user_status == 'paused':
+        keyboard.append([InlineKeyboardButton("▶️ استئناف", callback_data="resume_creation")])
+    
+    keyboard.append([
+        InlineKeyboardButton("⬇️ تحميل الدعوات", callback_data="download_invitations"),
+        InlineKeyboardButton("🆔 تحميل IDs", callback_data="download_ids")
+    ])
+    keyboard.append([InlineKeyboardButton("🔄 تحديث لوحة التحكم", callback_data="refresh_panel")])
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the user's main control panel."""
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+    
+    if not user_data:
+        # First time user, create a basic entry
+        create_or_update_user(user_id)
+        user_data = get_user(user_id) # Re-fetch to get default values
+
+    status_text = {
+        'idle': 'متوقف',
+        'running': 'يعمل الآن',
+        'paused': 'متوقف مؤقتًا'
+    }.get(user_data['status'], 'غير معروف')
+
+    sub_status = "غير مفعل"
+    if user_data['subscription_end_date']:
+        if user_data['subscription_end_date'] >= date.today():
+            days_left = (user_data['subscription_end_date'] - date.today()).days
+            sub_status = f"مفعل حتى {user_data['subscription_end_date'].strftime('%Y-%m-%d')} \\({days_left} يوم متبقي\\)"
+        else:
+            sub_status = "منتهي الصلاحية"
+
+    message_text = (
+        f"👋 أهلاً بك في لوحة التحكم الخاصة بك\\!\n\n"
+        f"✨ *حالة الاشتراك:* {sub_status}\n"
+        f"📧 *بريدك المؤقت اليومي:* `{user_data['current_email'] or 'لم يتم تعيينه'}`\n"
+        f"📊 *عدد الأعمال التي تم إنشاؤها:* `{user_data['businesses_created_count']}`\n"
+        f"⚙️ *حالة البوت:* `{status_text}`\n\n"
+        f"الرجاء إرسال الكوكيز الخاصة بك كرسالة نصية لبدء العمل\\."
     )
+    
+    await send_telegram_message(update, message_text, parse_mode='MarkdownV2', reply_markup=get_main_keyboard(user_data['status']))
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends a welcome message and the user panel."""
+    user_id = update.effective_user.id
+    # Ensure user exists in DB
+    user_data = get_user(user_id)
+    if not user_data:
+        create_or_update_user(user_id)
+        # If it's an admin, set is_admin to True
+        if user_id in ADMIN_IDS:
+            create_or_update_user(user_id, is_admin=True)
+            logger.info(f"User {user_id} set as admin.")
+
+    await send_user_panel(update, context)
 
 async def handle_cookies_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles incoming messages, expecting them to be cookies.
-    Starts the creation loop automatically if cookies are valid."""
+    """Handles incoming messages, expecting them to be cookies."""
     user_id = update.effective_user.id
     cookies_input_str = update.message.text.strip()
 
@@ -759,69 +970,121 @@ async def handle_cookies_message(update: Update, context: ContextTypes.DEFAULT_T
             parsed_cookies = parse_cookies(cookies_input_str)
             if 'c_user' in parsed_cookies and 'xs' in parsed_cookies:
                 user_cookies_storage[user_id] = parsed_cookies
-                await send_telegram_message(update,
-                    "✅ Cookies received successfully! You can now start the business creation loop.\n"
-                    "If you haven't already, set your TempMail API key using: `/set_tempmail_api_key YOUR_API_KEY`\n"
-                    "Then, the bot will automatically start creating businesses."
-                )
+                await send_telegram_message(update, "✅ تم استلام الكوكيز بنجاح\\! يمكنك الآن بدء عملية إنشاء الأعمال\\.", parse_mode='MarkdownV2')
                 logger.info(f"User {user_id} provided valid cookies.")
-                # Start the creation loop in a non-blocking way
-                # We don't start it immediately here, user needs to set API key first.
-                # The loop will be triggered when get_or_create_daily_temp_email is called.
-                context.application.create_task(create_business_loop(update, context))
-
+                await send_user_panel(update, context) # Refresh panel
             else:
-                await send_telegram_message(update,
-                    "❌ Invalid cookies. Please ensure they contain at least `c_user` and `xs`."
-                )
+                await send_telegram_message(update, "❌ كوكيز غير صالحة\\. يرجى التأكد من أنها تحتوي على `c_user` و `xs` على الأقل\\.", parse_mode='MarkdownV2')
                 logger.warning(f"User {user_id} provided invalid cookies format.")
         except Exception as e:
-            await send_telegram_message(update, f"❌ An error occurred while parsing cookies: {escape_markdown(str(e), version=2)}\nPlease ensure the format is correct.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ حدث خطأ أثناء تحليل الكوكيز: {escape_markdown(str(e), version=2)}\\. يرجى التأكد من التنسيق الصحيح\\.", parse_mode='MarkdownV2')
             logger.error(f"Error parsing cookies for user {user_id}: {e}")
     else:
-        await send_telegram_message(update, "❌ No cookies provided. Please send them as a single line.")
+        await send_telegram_message(update, "❌ لم يتم تقديم الكوكيز\\. يرجى إرسالها كسطر واحد\\.", parse_mode='MarkdownV2')
         logger.warning(f"User {user_id} sent empty message for cookies.")
 
-async def set_tempmail_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Allows the user to set their TempMail API key."""
-    user_id = update.effective_user.id
-    if not context.args:
-        await send_telegram_message(update, "Please provide your TempMail API key after the command. Example: `/set_tempmail_api_key YOUR_API_KEY`")
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles button presses from inline keyboards."""
+    query = update.callback_query
+    await query.answer() # Acknowledge the button press
+
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+
+    if not user_data:
+        await send_telegram_message(update, "يرجى بدء البوت أولاً باستخدام أمر /start\\.", parse_mode='MarkdownV2')
         return
 
-    api_key = context.args[0].strip()
-    
-    # Check if user already exists in DB
-    existing_config = get_user_tempmail_config(user_id)
-    if existing_config:
-        # Update existing entry
-        save_user_tempmail_config(user_id, api_key, existing_config.get("current_email"), existing_config.get("email_created_date"), existing_config.get("processed_uuids"))
-    else:
-        # Insert new entry
-        save_user_tempmail_config(user_id, api_key)
+    action = query.data
 
-    await send_telegram_message(update, "✅ Your TempMail API key has been saved successfully! The bot will now attempt to create businesses.")
-    logger.info(f"User {user_id} set their TempMail API key.")
-    # Trigger the business creation loop after setting API key
-    context.application.create_task(create_business_loop(update, context))
+    if action == "start_creation":
+        if user_data['status'] == 'running':
+            await send_telegram_message(update, "البوت يعمل بالفعل\\.", parse_mode='MarkdownV2')
+            return
+        
+        if not user_data['subscription_end_date'] or user_data['subscription_end_date'] < date.today():
+            await send_telegram_message(update, "❌ اشتراكك غير مفعل أو منتهي الصلاحية\\. يرجى التواصل مع المشرف لتفعيله\\.", parse_mode='MarkdownV2')
+            return
 
+        if user_id not in user_cookies_storage or not user_cookies_storage[user_id]:
+            await send_telegram_message(update, "❌ لم يتم حفظ الكوكيز الخاصة بك\\. يرجى إرسالها أولاً كرسالة نصية\\.", parse_mode='MarkdownV2')
+            return
+
+        update_user_status(user_id, 'running')
+        await send_telegram_message(update, "🚀 بدء عملية إنشاء الأعمال\\.", parse_mode='MarkdownV2', reply_markup=get_main_keyboard('running'))
+        # Start the creation loop in a non-blocking way
+        task = context.application.create_task(create_business_loop(update, context))
+        user_tasks[user_id] = task # Store the task to be able to cancel it
+        
+    elif action == "pause_creation":
+        if user_data['status'] != 'running':
+            await send_telegram_message(update, "البوت ليس في حالة تشغيل ليتم إيقافه مؤقتًا\\.", parse_mode='MarkdownV2')
+            return
+        
+        update_user_status(user_id, 'paused')
+        if user_id in user_tasks and not user_tasks[user_id].done():
+            user_tasks[user_id].cancel()
+            await send_telegram_message(update, "⏸️ تم إيقاف عملية إنشاء الأعمال مؤقتًا\\.", parse_mode='MarkdownV2', reply_markup=get_main_keyboard('paused'))
+        else:
+            await send_telegram_message(update, "البوت ليس في حالة تشغيل نشطة ليتم إيقافه مؤقتًا\\.", parse_mode='MarkdownV2', reply_markup=get_main_keyboard('paused'))
+
+    elif action == "resume_creation":
+        if user_data['status'] != 'paused':
+            await send_telegram_message(update, "البوت ليس في حالة إيقاف مؤقت ليتم استئنافه\\.", parse_mode='MarkdownV2')
+            return
+        
+        update_user_status(user_id, 'running')
+        await send_telegram_message(update, "▶️ استئناف عملية إنشاء الأعمال\\.", parse_mode='MarkdownV2', reply_markup=get_main_keyboard('running'))
+        task = context.application.create_task(create_business_loop(update, context))
+        user_tasks[user_id] = task
+
+    elif action == "download_invitations":
+        businesses = get_user_businesses(user_id)
+        if not businesses:
+            await send_telegram_message(update, "لا توجد دعوات متاحة للتحميل بعد\\.", parse_mode='MarkdownV2')
+            return
+        
+        file_content = "Business ID,Invitation Link,Created At\n"
+        for biz in businesses:
+            file_content += f"{biz['biz_id']},{biz['invitation_link']},{biz['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        file_name = f"invitations_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
+        await send_telegram_message(update, "✅ تم إرسال ملف الدعوات بنجاح\\.", parse_mode='MarkdownV2')
+
+    elif action == "download_ids":
+        businesses = get_user_businesses(user_id)
+        if not businesses:
+            await send_telegram_message(update, "لا توجد IDs متاحة للتحميل بعد\\.", parse_mode='MarkdownV2')
+            return
+        
+        file_content = "Business ID,Created At\n"
+        for biz in businesses:
+            file_content += f"{biz['biz_id']},{biz['created_at'].strftime('%Y-%m-%d %H:%M:%S')}\n"
+        
+        file_name = f"business_ids_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
+        await send_telegram_message(update, "✅ تم إرسال ملف IDs الأعمال بنجاح\\.", parse_mode='MarkdownV2')
+
+    elif action == "refresh_panel":
+        await send_user_panel(update, context)
 
 async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[str, str] | tuple[None, None]:
     """
     Retrieves the user's current TempMail email or creates a new one if it's a new day.
     Returns (email_address, api_key) or (None, None) if no API key is set.
     """
-    user_config = get_user_tempmail_config(user_id)
+    user_data = get_user(user_id)
 
-    if not user_config or not user_config.get("api_key"):
-        await send_telegram_message(update, "❌ Please set your TempMail API key first using `/set_tempmail_api_key YOUR_API_KEY`.")
+    if not user_data or not user_data.get("tempmail_api_key"):
+        await send_telegram_message(update, "❌ يرجى تعيين مفتاح TempMail API الخاص بك أولاً\\. تواصل مع المشرف أو استخدم أمر /set_tempmail_api_key إذا كان متاحًا لك\\.", parse_mode='MarkdownV2')
         return None, None
 
-    api_key = user_config["api_key"]
-    current_email = user_config.get("current_email")
-    email_created_date = user_config.get("email_created_date")
+    api_key = user_data["tempmail_api_key"]
+    current_email = user_data.get("current_email")
+    email_created_date = user_data.get("email_created_at")
     
-    today = datetime.now().date()
+    today = date.today()
 
     if current_email and email_created_date == today:
         logger.info(f"User {user_id} using existing TempMail: {current_email}")
@@ -831,95 +1094,312 @@ async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[
         new_email = create_temp_email(api_key)
         if new_email:
             # Reset processed UUIDs for the new email
-            update_user_email_and_uuids(user_id, new_email, today, set())
+            update_user_tempmail_config(user_id, email=new_email, email_date=today, uuids=set())
             return new_email, api_key
         else:
-            await send_telegram_message(update, "❌ Failed to create a new temporary email address. Please check your TempMail API key or try again later.")
+            await send_telegram_message(update, "❌ فشل إنشاء عنوان بريد إلكتروني مؤقت جديد\\. يرجى التحقق من مفتاح TempMail API الخاص بك أو المحاولة لاحقًا\\.", parse_mode='MarkdownV2')
             return None, None
 
 async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Continuously creates businesses until limit is reached or a persistent error occurs."""
     user_id = update.effective_user.id
     
+    # Check user status from DB
+    user_data = get_user(user_id)
+    if not user_data or user_data['status'] != 'running':
+        logger.info(f"User {user_id} is not in 'running' status. Stopping loop.")
+        return # Stop if not explicitly running
+
     if user_id not in user_cookies_storage or not user_cookies_storage[user_id]:
-        await send_telegram_message(update, "❌ Your cookies are not saved. Please send them first as a text message.")
+        await send_telegram_message(update, "❌ الكوكيز الخاصة بك غير محفوظة\\. يرجى إرسالها أولاً كرسالة نصية\\.", parse_mode='MarkdownV2')
+        update_user_status(user_id, 'idle')
+        await send_user_panel(update, context)
         return
 
     # Get or create daily TempMail email
     admin_email, tempmail_api_key = await get_or_create_daily_temp_email(user_id, update)
     if not admin_email or not tempmail_api_key:
+        update_user_status(user_id, 'idle')
+        await send_user_panel(update, context)
         return # Error message already sent by get_or_create_daily_temp_email
 
-    business_count = 0
     while True:
-        business_count += 1
-        await send_telegram_message(update, f"🚀 Attempting to create Business #{business_count}...")
-        logger.info(f"User {user_id}: Starting creation for Business #{business_count}")
+        # Re-check status in each iteration
+        user_data = get_user(user_id)
+        if not user_data or user_data['status'] != 'running':
+            logger.info(f"User {user_id} changed status to {user_data['status']}. Stopping loop.")
+            break # Exit the loop if status is not 'running'
+
+        # Check subscription validity
+        if not user_data['subscription_end_date'] or user_data['subscription_end_date'] < date.today():
+            await send_telegram_message(update, "❌ اشتراكك منتهي الصلاحية\\. تم إيقاف عملية إنشاء الأعمال\\.", parse_mode='MarkdownV2')
+            update_user_status(user_id, 'idle')
+            await send_user_panel(update, context)
+            break # Exit the loop
+
+        current_businesses_count = user_data['businesses_created_count'] + 1
+        await send_telegram_message(update, f"🚀 محاولة إنشاء العمل رقم \\#{current_businesses_count}\\.\\.\\.", parse_mode='MarkdownV2')
+        logger.info(f"User {user_id}: Starting creation for Business #{current_businesses_count}")
 
         max_retries_per_business = 3
         initial_delay = 5 # seconds
         
         current_biz_attempt_success = False
         for attempt in range(1, max_retries_per_business + 1):
-            await send_telegram_message(update, f"⏳ Business #{business_count}: Creation attempt {attempt}/{max_retries_per_business}...", silent=True)
-            logger.info(f"User {user_id}: Business #{business_count}, creation attempt {attempt}")
+            await send_telegram_message(update, f"⏳ العمل رقم \\#{current_businesses_count}: محاولة الإنشاء {attempt}/{max_retries_per_business}\\.\\.\\.", parse_mode='MarkdownV2', silent=True)
+            logger.info(f"User {user_id}: Business #{current_businesses_count}, creation attempt {attempt}")
 
-            # Pass admin_email and tempmail_api_key to create_facebook_business
             success, biz_id, invitation_link, error_message = await create_facebook_business(
                 user_cookies_storage[user_id], admin_email, tempmail_api_key, update
             )
 
             if success == "LIMIT_REACHED":
-                await send_telegram_message(update, "🛑 Facebook business creation limit reached for these cookies! Stopping further attempts.")
-                logger.info(f"User {user_id}: Business creation limit reached. Total created: {business_count - 1}")
+                await send_telegram_message(update, "🛑 تم الوصول إلى حد إنشاء أعمال فيسبوك لهذه الكوكيز\\! إيقاف المحاولات الإضافية\\.", parse_mode='MarkdownV2')
+                logger.info(f"User {user_id}: Business creation limit reached. Total created: {user_data['businesses_created_count']}")
+                update_user_status(user_id, 'idle')
+                await send_user_panel(update, context)
                 return # Exit the loop and function
             elif success:
+                save_user_business(user_id, biz_id, invitation_link)
+                increment_businesses_created_count(user_id)
+                
                 message = (
-                    f"🎉 Business created successfully\\!\n"
-                    f"📊 \\*Business ID:\\* `{escape_markdown(biz_id, version=2)}`\n"
-                    f"🔗 \\*Invitation Link:\\* {escape_markdown(invitation_link, version=2)}"
+                    f"🎉 تم إنشاء العمل بنجاح\\!\n"
+                    f"📊 \\*معرف العمل:\\* `{escape_markdown(biz_id, version=2)}`\n"
+                    f"🔗 \\*رابط الدعوة:\\* {escape_markdown(invitation_link, version=2)}"
                 )
                 await send_telegram_message(update, message, parse_mode='MarkdownV2')
-                logger.info(f"User {user_id}: Business #{business_count} created successfully on attempt {attempt}.")
+                logger.info(f"User {user_id}: Business #{current_businesses_count} created successfully on attempt {attempt}.")
                 current_biz_attempt_success = True
                 break # Break from inner retry loop, move to next business
             else:
-                logger.error(f"User {user_id}: Business #{business_count} creation failed on attempt {attempt}. Reason: {error_message}")
+                logger.error(f"User {user_id}: Business #{current_businesses_count} creation failed on attempt {attempt}. Reason: {error_message}")
                 
                 if attempt < max_retries_per_business:
                     delay = initial_delay * (2 ** (attempt - 1)) # Exponential backoff
                     await send_telegram_message(update, 
-                        f"❌ Business #{business_count}: Creation failed on attempt {attempt}. Reason: {escape_markdown(error_message, version=2)}\n"
-                        f"Retrying in {delay} seconds...", parse_mode='MarkdownV2'
+                        f"❌ العمل رقم \\#{current_businesses_count}: فشلت المحاولة {attempt}\\. السبب: {escape_markdown(error_message, version=2)}\n"
+                        f"إعادة المحاولة في {delay} ثوانٍ\\.\\.\\.", parse_mode='MarkdownV2'
                     )
                     time.sleep(delay)
                 else:
                     final_error_message = (
-                        f"❌ Business #{business_count}: All {max_retries_per_business} attempts failed.\n"
-                        f"Last error: {escape_markdown(error_message, version=2)}"
+                        f"❌ العمل رقم \\#{current_businesses_count}: فشلت جميع المحاولات الـ {max_retries_per_business}\\.\n"
+                        f"آخر خطأ: {escape_markdown(error_message, version=2)}"
                     )
                     if biz_id:
-                        final_error_message += f"\n📊 \\*Partial Business ID:\\* `{escape_markdown(biz_id, version=2)}`"
+                        final_error_message += f"\n📊 \\*معرف العمل الجزئي:\\* `{escape_markdown(biz_id, version=2)}`"
                     await send_telegram_message(update, final_error_message, parse_mode='MarkdownV2')
-                    logger.error(f"User {user_id}: Business #{business_count}: All attempts failed. Final error: {error_message}")
+                    logger.error(f"User {user_id}: Business #{current_businesses_count}: All attempts failed. Final error: {error_message}")
         
         if not current_biz_attempt_success:
-            await send_telegram_message(update, f"⚠️ Business #{business_count} could not be created after multiple retries. Moving to next business attempt.")
+            await send_telegram_message(update, f"⚠️ العمل رقم \\#{current_businesses_count} لم يتم إنشاؤه بعد عدة محاولات\\. الانتقال إلى محاولة عمل تالية\\.", parse_mode='MarkdownV2')
             time.sleep(random.randint(10, 20))
         else:
-            await send_telegram_message(update, f"✅ Business #{business_count} created. Waiting a bit before next attempt...")
+            await send_telegram_message(update, f"✅ تم إنشاء العمل رقم \\#{current_businesses_count}\\. الانتظار قليلاً قبل المحاولة التالية\\.\\.\\.", parse_mode='MarkdownV2')
             time.sleep(random.randint(5, 15))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
     await send_telegram_message(update,
-        "I am a bot for creating Facebook Business Manager accounts.\n\n"
-        "Steps:\n"
-        "1. Send me your Facebook cookies as a single line of text.\n"
-        "2. Set your TempMail API key using: `/set_tempmail_api_key YOUR_API_KEY`\n"
-        "3. I will automatically start creating businesses for you until the limit is reached.\n\n"
-        "Note: The process might take a few minutes per business and includes retries for robustness."
+        "أنا بوت لإنشاء حسابات مدير أعمال فيسبوك\\.\n\n"
+        "الخطوات:\n"
+        "1\\. أرسل لي الكوكيز الخاصة بك كسطر واحد من النص\\.\n"
+        "2\\. اضغط على زر \"بدء جلسة جديدة\" في لوحة التحكم\\.\n\n"
+        "ملاحظة: قد تستغرق العملية بضع دقائق لكل عمل وتتضمن محاولات إعادة لضمان المتانة\\."
+        "إذا كنت بحاجة إلى تعيين مفتاح TempMail API الخاص بك، يرجى التواصل مع المشرف\\."
+        , parse_mode='MarkdownV2'
     )
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin panel command."""
+    user_id = update.effective_user.id
+    user_data = get_user(user_id)
+
+    if not user_data or not user_data['is_admin']:
+        await send_telegram_message(update, "❌ ليس لديك صلاحيات المشرف للوصول إلى هذه اللوحة\\.", parse_mode='MarkdownV2')
+        return
+
+    await send_admin_panel(update, context)
+
+async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, user_page: int = 0) -> None:
+    """Sends the admin control panel."""
+    users = get_all_users()
+    total_users = len(users)
+    users_per_page = 10
+    total_pages = (total_users + users_per_page - 1) // users_per_page
+    
+    start_index = user_page * users_per_page
+    end_index = start_index + users_per_page
+    users_on_page = users[start_index:end_index]
+
+    message_text = f"لوحة تحكم المشرف \\(المستخدمون: {total_users}\\)\n\n"
+    if not users_on_page:
+        message_text += "لا يوجد مستخدمون لعرضهم\\."
+    else:
+        for user in users_on_page:
+            sub_status = "غير مفعل"
+            if user['subscription_end_date']:
+                if user['subscription_end_date'] >= date.today():
+                    days_left = (user['subscription_end_date'] - date.today()).days
+                    sub_status = f"مفعل \\({days_left} يوم\\)"
+                else:
+                    sub_status = "منتهي"
+            
+            admin_status = " \\(مشرف\\)" if user['is_admin'] else ""
+            message_text += (
+                f"\\- ID: `{user['user_id']}` {admin_status}\n"
+                f"  الاشتراك: {sub_status}\n"
+                f"  الأعمال: {user['businesses_created_count']}\n"
+                f"  الحالة: {user['status']}\n"
+                f"  تاريخ الانضمام: {user['created_at'].strftime('%Y-%m-%d')}\n\n"
+            )
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ تفعيل اشتراك", callback_data="admin_activate_sub")],
+        [InlineKeyboardButton("🔑 تعيين TempMail API", callback_data="admin_set_tempmail_api")],
+        [InlineKeyboardButton("📊 إحصائيات عامة", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔄 تحديث", callback_data="admin_refresh_panel")]
+    ]
+
+    # Pagination buttons
+    pagination_buttons = []
+    if user_page > 0:
+        pagination_buttons.append(InlineKeyboardButton("⬅️ السابق", callback_data=f"admin_users_page_{user_page - 1}"))
+    if user_page < total_pages - 1:
+        pagination_buttons.append(InlineKeyboardButton("التالي ➡️", callback_data=f"admin_users_page_{user_page + 1}"))
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+
+    await send_telegram_message(update, message_text, parse_mode='MarkdownV2', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def admin_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles admin panel button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    user_data = get_user(user_id)
+
+    if not user_data or not user_data['is_admin']:
+        await send_telegram_message(update, "❌ ليس لديك صلاحيات المشرف\\.", parse_mode='MarkdownV2')
+        return
+
+    action = query.data
+
+    if action == "admin_activate_sub":
+        await send_telegram_message(update, "لتفعيل الاشتراك، أرسل الأمر بالتنسيق التالي:\n`/activate_sub <user_id> <days>`\nمثال: `/activate_sub 123456789 30` (لتفعيل 30 يومًا)", parse_mode='MarkdownV2')
+    
+    elif action == "admin_set_tempmail_api":
+        await send_telegram_message(update, "لتعيين مفتاح TempMail API لمستخدم، أرسل الأمر بالتنسيق التالي:\n`/set_user_tempmail_api <user_id> <api_key>`\nمثال: `/set_user_tempmail_api 123456789 131|nLYDwolNM8987MZX7s0At3muNsbK7S7tJ3nKrrvu1677734a`", parse_mode='MarkdownV2')
+
+    elif action == "admin_stats":
+        total_users = len(get_all_users())
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT SUM(businesses_created_count) FROM users;")
+            total_businesses = cur.fetchone()[0] or 0
+            
+            cur.execute("SELECT COUNT(*) FROM users WHERE subscription_end_date >= CURRENT_DATE;")
+            active_subscriptions = cur.fetchone()[0] or 0
+
+            message = (
+                f"📊 *إحصائيات عامة:*\n"
+                f"  عدد المستخدمين الكلي: `{total_users}`\n"
+                f"  الاشتراكات النشطة: `{active_subscriptions}`\n"
+                f"  إجمالي الأعمال التي تم إنشاؤها: `{total_businesses}`"
+            )
+            await send_telegram_message(update, message, parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.error(f"Error getting admin stats: {e}")
+            await send_telegram_message(update, f"❌ حدث خطأ أثناء جلب الإحصائيات: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+    elif action == "admin_refresh_panel":
+        await send_admin_panel(update, context)
+    
+    elif action.startswith("admin_users_page_"):
+        page = int(action.split('_')[-1])
+        await send_admin_panel(update, context, user_page=page)
+
+async def activate_subscription_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to activate user subscription."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await send_telegram_message(update, "❌ ليس لديك صلاحيات المشرف\\.", parse_mode='MarkdownV2')
+        return
+
+    if len(context.args) != 2:
+        await send_telegram_message(update, "❌ استخدام خاطئ\\. التنسيق الصحيح: `/activate_sub <user_id> <days>`", parse_mode='MarkdownV2')
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        days = int(context.args[1])
+        
+        target_user_data = get_user(target_user_id)
+        if not target_user_data:
+            # Create user if not exists
+            create_or_update_user(target_user_id)
+            target_user_data = get_user(target_user_id)
+
+        current_end_date = target_user_data['subscription_end_date'] or date.today()
+        if current_end_date < date.today():
+            current_end_date = date.today() # Start from today if expired
+
+        new_end_date = current_end_date + timedelta(days=days)
+        
+        create_or_update_user(target_user_id, subscription_end_date=new_end_date)
+        await send_telegram_message(update, f"✅ تم تفعيل الاشتراك للمستخدم `{target_user_id}` حتى `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+        # Notify target user
+        try:
+            await context.bot.send_message(chat_id=target_user_id, text=f"🎉 تم تفعيل اشتراكك بنجاح حتى `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id} about subscription activation: {e}")
+
+    except ValueError:
+        await send_telegram_message(update, "❌ معرف المستخدم أو عدد الأيام غير صالح\\. يرجى إدخال أرقام صحيحة\\.", parse_mode='MarkdownV2')
+    except Exception as e:
+        logger.error(f"Error activating subscription: {e}")
+        await send_telegram_message(update, f"❌ حدث خطأ أثناء تفعيل الاشتراك: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
+
+async def set_user_tempmail_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to set TempMail API key for a user."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await send_telegram_message(update, "❌ ليس لديك صلاحيات المشرف\\.", parse_mode='MarkdownV2')
+        return
+
+    if len(context.args) != 2:
+        await send_telegram_message(update, "❌ استخدام خاطئ\\. التنسيق الصحيح: `/set_user_tempmail_api <user_id> <api_key>`", parse_mode='MarkdownV2')
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        api_key = context.args[1]
+        
+        target_user_data = get_user(target_user_id)
+        if not target_user_data:
+            # Create user if not exists
+            create_or_update_user(target_user_id)
+            
+        update_user_tempmail_config(target_user_id, api_key=api_key)
+        await send_telegram_message(update, f"✅ تم تعيين مفتاح TempMail API للمستخدم `{target_user_id}` بنجاح\\.", parse_mode='MarkdownV2')
+        # Notify target user
+        try:
+            await context.bot.send_message(chat_id=target_user_id, text="🎉 تم تعيين مفتاح TempMail API الخاص بك بنجاح\\.", parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.warning(f"Could not notify user {target_user_id} about API key setting: {e}")
+
+    except ValueError:
+        await send_telegram_message(update, "❌ معرف المستخدم غير صالح\\. يرجى إدخال رقم صحيح\\.", parse_mode='MarkdownV2')
+    except Exception as e:
+        logger.error(f"Error setting user TempMail API key: {e}")
+        await send_telegram_message(update, f"❌ حدث خطأ أثناء تعيين مفتاح TempMail API: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
 
 async def error_handler(update: object, context: CallbackContext) -> None:
     """Log the error and send a telegram message to notify the user."""
@@ -931,15 +1411,17 @@ async def error_handler(update: object, context: CallbackContext) -> None:
     escaped_error_message = escape_markdown(str(context.error), version=2)
     
     message = (
-        "An unexpected error occurred while processing your request\\. "
-        "The developers have been notified\\.\n\n"
-        f"Error: `{escaped_error_message}`"
+        "حدث خطأ غير متوقع أثناء معالجة طلبك\\. "
+        "تم إبلاغ المطورين\\.\n\n"
+        f"الخطأ: `{escaped_error_message}`"
     )
     
     if update.effective_message:
         await send_telegram_message(update, message, parse_mode='MarkdownV2')
+    elif update.callback_query:
+        await send_telegram_message(update, message, parse_mode='MarkdownV2')
     else:
-        logger.warning("Error handler called without an effective message.")
+        logger.warning("Error handler called without an effective message or callback query.")
 
 def main_telegram_bot():
     """Starts the Telegram bot."""
@@ -953,10 +1435,16 @@ def main_telegram_bot():
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("set_tempmail_api_key", set_tempmail_api_key)) # New command
+    application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("activate_sub", activate_subscription_command))
+    application.add_handler(CommandHandler("set_user_tempmail_api", set_user_tempmail_api_command))
 
     # Message handler for cookies (any text message that is not a command)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cookies_message))
+
+    # Callback query handler for inline buttons
+    application.add_handler(CallbackQueryHandler(handle_callback_query, pattern="^(start_creation|pause_creation|resume_creation|download_invitations|download_ids|refresh_panel)$"))
+    application.add_handler(CallbackQueryHandler(admin_callback_query, pattern="^admin_"))
 
     # Register error handler
     application.add_error_handler(error_handler) 
@@ -966,4 +1454,3 @@ def main_telegram_bot():
 
 if __name__ == "__main__":
     main_telegram_bot()
-
