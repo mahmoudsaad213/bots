@@ -436,7 +436,7 @@ async def wait_for_invitation_email(user_id: int, email_address: str, api_key: s
         if new_uuids_found_in_iteration:
             update_user_tempmail_config(user_id, uuids=processed_uuids)
 
-        await send_telegram_message(update, "⏳ _Waiting for invitation email... Retrying in 10 seconds._", silent=True, parse_mode='MarkdownV2')
+        await send_telegram_message(update, "⏳ Still waiting for invitation email... Retrying in 10 seconds.", silent=True)
         time.sleep(10)  # Wait 10 seconds before checking again
     
     logger.warning("⏰ Timeout waiting for invitation email")
@@ -473,7 +473,7 @@ def generate_business_name():
         f"{random.choice(business_prefixes)} {random.choice(business_suffixes)} {random_num}",
         f"{random.choice(business_prefixes)}{random_num}",
         f"M{random_num} {random.choice(business_suffixes)}",
-        f"{random.choice(business_prefixes)} {random.choice(business_suffixes)}",
+        f"{random.choice(business_prefixes)} {random_num}",
         f"Company {random_num}"
     ]
     return random.choice(name_formats)
@@ -601,7 +601,7 @@ def _build_setup_review_data(user_id: str, token_value: str, biz_id: str, admin_
         '__hsi': '7539772710483233608', # Specific for this mutation
         '__dyn': '7xeUmxa2C5rgydwCwRyU8EKmhe2Om2q1DxiFGxK7oG484S4UKewSAAzpoixW4E726US2Sfxq4U5i4824yoyaxG4o4B0l898885G0Eo9FE4WqbwLghwLyaxBa2dmm11K6U8o2lxep122y5oeEjx63K2y1py-0DU2qwgEhxWbwQwnHxC0Bo9k2B2V8cE98451KfwXxq1-orx2ewyx6i2GU8U-U98C2i48nwCAzEowwwTxu1cwh8S1qxa3O6UW4UnwhFA0FUkx22W11wCz84e2K7EOicwVyES2e0UFU6K19xq1owqp8aE4KeyE9Eco9U4S7ErwMxN0lF9UcE3xwtU5K2G0BE88twba3i15xBxa2u1aw', # Specific for this mutation
         '__hsdp': '85v92crRg8pkFxqe5ybjyk8jdAQO5WQm2G3qm2a9StAK2KK1txC_xAC4y4KIqilJjCZKcCy8GE49BGze5ahk1exugG8ukidxe2504Fg2EadzE9UWFFEgwNqzpEb4EgG-ezFjzczF2CQA4l1gUjxK5k2d8kieFD18EYE9FE1uU5S1Gwto5q0lGl6e0dLw0X1Kq9ym2aiQezUpAximbCjw0xfw', # Specific for this mutation
-        '__hblp': '0Rwbu3G6U4W1gw48w54w75xGE1oA0OA2q7pUdUCbwoobU88aWwjUdE6i1Gw8y1ZwVK0FE9U3oG1tw7jG1iw8uE3PwkU2kzonwYwrE6C1ZwiUeo1vo6i17xO4Uiy9ES6awno1kElwlEao3BwtEG3-7EhwHwmoaE9bwIAgK8x2l4xii9wwxq5GqqUy2it0iUaoyazE4u2G6E4-az85e78cECayEjwrFEq_82aRwXKUSmWyGK7FWhd5gC9zdfU8rG4KE7-3zwGwfe2q68cA5A58b8gy837wxwmo2WwFwnFUc-m2O5o8oS9xWi2OnwIDwko8U8EW1wxV1C229xG7p8owNxydg6x0DwNiw8u3uui', # Specific for this mutation
+        '__hblp': '0Rwbu3G6U4W1gw48w54w75xGE1oA0OA2q7pUdUCbwoobU88aWwjUdE6i1Gw8y1ZwVK0FE9U3oG1tw7jG1iw8uE3PwkU2kzonwYwrE6C1ZwiUeo1vo6i17xO4Uiy9ES6awno1kElwlEao3BwtEG3-7EhwHwmoaE9bwIAgK8x2l4xii9wwxq5GwwyEO1OyawhVE88lg4Cex-1dwSw9C3G2mi0ha0DE98iBx23a11w_xJa2W9BwBCxm2Kq4EswMyomwwwkEgwxg9Ulxm5qGqqUy2it0iUaoyazE4u2G6E4-az85e78cECayEjwrFEq_82aRwXKUSmWyGK7FWhd5gC9zdfU8rG4KE7-3zwGwfe2q68cA5A58b8gy837wxwmo2WwFwnFUc-m2O5o8oS9xWi2OnwIDwko8U8EW1wxV1C229xG7p8owNxydg6x0DwNiw8u3uui', # Specific for this mutation
         'fb_api_caller_class': 'RelayModern',
         'fb_api_req_friendly_name': 'BizKitBusinessSetupReviewCardMutation',
         'variables': f'{{"businessId":"{biz_id}","entryPoint":"BIZWEB_BIZ_SETUP_REVIEW_CARD","inviteUsers":[{{"email":"{admin_email}","roles":["ADMIN"]}}],"personalPageIdsToBeClaimed":[],"directPageUsers":[],"flowType":"BUSINESS_CREATION_IN_FBS"}}',
@@ -645,18 +645,18 @@ async def _get_token(cookies: dict, user_agent: str, update: Update):
         token_value = extract_token_from_response(response)
         
         if not token_value:
-            await send_telegram_message(update, "❌ *Failed to get token\\.* Please check your cookies validity\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Token not found\\. Please check your cookies validity\\.", parse_mode='MarkdownV2')
             return None
         logger.info(f"✅ Token obtained successfully: {token_value[:20]}...")
         time.sleep(2)
         return token_value
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Network error during token retrieval: {e}")
-        await send_telegram_message(update, f"❌ *Network error during token retrieval:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Network error during token retrieval: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return None
     except Exception as e:
         logger.error(f"❌ General error during token retrieval: {e}")
-        await send_telegram_message(update, f"❌ *General error during token retrieval:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ General error during token retrieval: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return None
 
 async def _create_initial_business(cookies: dict, token_value: str, user_id: str, business_name: str, first_name: str, last_name: str, email: str, user_agent: str, update: Update):
@@ -693,14 +693,14 @@ async def _create_initial_business(cookies: dict, token_value: str, user_id: str
             
             error_messages = [error.get('message', 'Unknown error') for error in response_json['errors']]
             logger.error(f"❌ Failed to create business account: {'; '.join(error_messages)}")
-            await send_telegram_message(update, f"❌ *Failed to create business account:* `{escape_markdown('; '.join(error_messages), version=2)}`", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ Failed to create business account: {escape_markdown('; '.join(error_messages), version=2)}", parse_mode='MarkdownV2')
             return None, f"Failed to create business account: {'; '.join(error_messages)}"
             
         elif 'error' in response_json:
             error_code = response_json.get('error', 'Unknown')
             error_desc = response_json.get('errorDescription', 'Unknown error')
             logger.error(f"❌ Error {error_code}: {error_desc}")
-            await send_telegram_message(update, f"❌ *Facebook API Error* `{error_code}`: `{escape_markdown(error_desc, version=2)}`", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ Facebook API Error {error_code}: {escape_markdown(error_desc, version=2)}", parse_mode='MarkdownV2')
             return None, f"Facebook API Error {error_code}: {error_desc}"
             
         elif 'data' in response_json:
@@ -711,24 +711,24 @@ async def _create_initial_business(cookies: dict, token_value: str, user_id: str
                 return biz_id, None
             except KeyError:
                 logger.error("⚠️ Could not extract Business ID from response.")
-                await send_telegram_message(update, "⚠️ *Could not extract Business ID from response\\.*", parse_mode='MarkdownV2')
+                await send_telegram_message(update, "⚠️ Could not extract Business ID from response\\.", parse_mode='MarkdownV2')
                 return None, "Could not extract Business ID from response."
         else:
             logger.warning("⚠️ Unexpected response format during business creation.")
-            await send_telegram_message(update, "⚠️ *Unexpected response format during business creation\\.*", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "⚠️ Unexpected response format during business creation\\.", parse_mode='MarkdownV2')
             return None, "Unexpected response format during business creation."
             
     except json.JSONDecodeError as e:
         logger.error(f"❌ JSON decode error during business creation: {e}. Response: {response_create.text[:500]}...")
-        await send_telegram_message(update, f"❌ *JSON decode error during business creation:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ JSON decode error: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return None, f"JSON decode error: {e}"
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Network error during business creation: {e}")
-        await send_telegram_message(update, f"❌ *Network error during business creation:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Network error during business creation: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return None, f"Network error: {e}"
     except Exception as e:
         logger.error(f"❌ General error during business creation: {e}")
-        await send_telegram_message(update, f"❌ *General error during business creation:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ General error during business creation: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return None, f"General error: {e}"
 
 async def _setup_review_and_invite(cookies: dict, token_value: str, user_id: str, biz_id: str, admin_email: str, update: Update):
@@ -768,33 +768,33 @@ async def _setup_review_and_invite(cookies: dict, token_value: str, user_id: str
         if 'errors' in response_json:
             error_messages = [error.get('message', 'Unknown error') for error in response_json['errors']]
             logger.error(f"❌ Failed to complete business setup: {'; '.join(error_messages)}")
-            await send_telegram_message(update, f"❌ *Failed to complete business setup:* `{escape_markdown('; '.join(error_messages), version=2)}`", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ Failed to complete business setup: {escape_markdown('; '.join(error_messages), version=2)}", parse_mode='MarkdownV2')
             return False
         elif 'error' in response_json:
             error_code = response_json.get('error', 'Unknown')
             error_desc = response_json.get('errorDescription', 'Unknown error')
             logger.error(f"❌ Setup Error {error_code}: {error_desc}")
-            await send_telegram_message(update, f"❌ *Setup Error* `{error_code}`: `{escape_markdown(error_desc, version=2)}`", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ Setup Error {error_code}: {escape_markdown(error_desc, version=2)}", parse_mode='MarkdownV2')
             return False
         elif 'data' in response_json:
             logger.info("✅ Business setup completed successfully!")
             return True
         else:
             logger.warning(f"⚠️ Unexpected setup response format: {response_json}")
-            await send_telegram_message(update, "⚠️ *Unexpected setup response format\\.*", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "⚠️ Unexpected setup response format\\.", parse_mode='MarkdownV2')
             return False
             
     except json.JSONDecodeError as e:
         logger.error(f"❌ JSON decode error in setup response: {e}. Response: {response.text[:500]}...")
-        await send_telegram_message(update, f"❌ *JSON decode error in setup:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ JSON decode error in setup: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return False
     except requests.RequestException as e:
         logger.error(f"❌ Network error during setup: {e}")
-        await send_telegram_message(update, f"❌ *Network error during setup:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Network error during setup: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return False
     except Exception as e:
         logger.error(f"❌ General error in setup: {e}")
-        await send_telegram_message(update, f"❌ *General error in setup:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ General error in setup: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         return False
 
 async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmail_api_key: str, update: Update):
@@ -814,15 +814,15 @@ async def create_facebook_business(cookies_dict: dict, admin_email: str, tempmai
     
     # --- Pre-check cookies validity ---
     try:
-        await send_telegram_message(update, "🔍 _Checking cookies validity..._", silent=True, parse_mode='MarkdownV2')
+        await send_telegram_message(update, "🔍 Checking cookies validity...", silent=True)
         response = requests.get('https://business.facebook.com/overview', cookies=cookies, timeout=15, allow_redirects=True)
         response.raise_for_status()
         if "login.php" in response.url:
-            await send_telegram_message(update, "❌ *Your cookies are invalid or expired\\!* Please send new cookies\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Your cookies are invalid or expired\\. Please send new cookies\\.", parse_mode='MarkdownV2')
             return False, None, None, "Cookies invalid or expired."
-        await send_telegram_message(update, "✅ _Cookies appear valid\\._", silent=True, parse_mode='MarkdownV2')
+        await send_telegram_message(update, "✅ Cookies appear valid\\.", silent=True, parse_mode='MarkdownV2')
     except requests.RequestException as e:
-        await send_telegram_message(update, f"❌ *Failed to validate cookies:* `{escape_markdown(str(e), version=2)}`\\. Please send new cookies\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Failed to validate cookies: {escape_markdown(str(e), version=2)}\\. Please send new cookies\\.", parse_mode='MarkdownV2')
         return False, None, None, f"Failed to validate cookies: {e}"
 
     first_name, last_name = generate_random_name()
@@ -886,8 +886,6 @@ async def send_telegram_message(update: Update, text: str, parse_mode: str = Non
     try:
         # Ensure text is escaped if MarkdownV2 is used
         if parse_mode == 'MarkdownV2':
-            # Replace any occurrences of "//" with "/" to prevent MarkdownV2 errors
-            text = text.replace('//', '/')
             text = escape_markdown(text, version=2)
         
         if update.callback_query:
@@ -903,13 +901,13 @@ async def get_main_keyboard(user_id: int, user_status: str = 'idle') -> InlineKe
     if user_status == 'idle' or user_status == 'paused':
         keyboard.append([InlineKeyboardButton("🚀 Start New Session", callback_data="start_creation")])
     if user_status == 'running':
-        keyboard.append([InlineKeyboardButton("⏸️ Pause Creation", callback_data="pause_creation")])
+        keyboard.append([InlineKeyboardButton("⏸️ Pause", callback_data="pause_creation")])
     if user_status == 'paused':
-        keyboard.append([InlineKeyboardButton("▶️ Resume Creation", callback_data="resume_creation")])
+        keyboard.append([InlineKeyboardButton("▶️ Resume", callback_data="resume_creation")])
     
     keyboard.append([
         InlineKeyboardButton("⬇️ Download Invitations", callback_data="download_invitations"),
-        InlineKeyboardButton("🆔 Download Business IDs", callback_data="download_ids")
+        InlineKeyboardButton("🆔 Download IDs", callback_data="download_ids")
     ])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Panel", callback_data="refresh_panel")])
 
@@ -937,22 +935,21 @@ async def send_user_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         'paused': 'Paused'
     }.get(user_data['status'], 'Unknown')
 
-    sub_status = "Inactive 🔴"
+    sub_status = "Inactive"
     if user_data['subscription_end_date']:
         if user_data['subscription_end_date'] >= date.today():
             days_left = (user_data['subscription_end_date'] - date.today()).days
-            sub_status = f"Active ✅ until {user_data['subscription_end_date'].strftime('%Y-%m-%d')} ({days_left} days left)"
+            sub_status = f"Active until {user_data['subscription_end_date'].strftime('%Y-%m-%d')} \\({days_left} days left\\)"
         else:
-            sub_status = "Expired ❌"
+            sub_status = "Expired"
 
     message_text = (
-        f"✨ *BM Bot Control Panel* ✨\n\n"
-        f"👋 Welcome to your control panel, user `{user_id}`\\!\n\n"
-        f"🌟 *Subscription Status:* {sub_status}\n"
+        f"👋 Welcome to your control panel\\!\n\n"
+        f"✨ *Subscription Status:* {sub_status}\n"
         f"📧 *Your Daily TempMail:* `{user_data['current_email'] or 'Not set'}`\n"
         f"📊 *Businesses Created:* `{user_data['businesses_created_count']}`\n"
         f"⚙️ *Bot Status:* `{status_text}`\n\n"
-        f"Please send your *Facebook cookies* as a text message to start working\\."
+        f"Please send your Facebook cookies as a text message to start working\\."
     )
     
     await send_telegram_message(update, message_text, parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, user_data['status']))
@@ -984,17 +981,17 @@ async def handle_cookies_message(update: Update, context: ContextTypes.DEFAULT_T
             parsed_cookies = parse_cookies(cookies_input_str)
             if 'c_user' in parsed_cookies and 'xs' in parsed_cookies:
                 user_cookies_storage[user_id] = parsed_cookies
-                await send_telegram_message(update, "✅ *Cookies received successfully\\!* You can now start the business creation process\\.", parse_mode='MarkdownV2')
+                await send_telegram_message(update, "✅ Cookies received successfully\\! You can now start the business creation process\\.", parse_mode='MarkdownV2')
                 logger.info(f"User {user_id} provided valid cookies.")
                 await send_user_panel(update, context) # Refresh panel
             else:
-                await send_telegram_message(update, "❌ *Invalid cookies\\.* Please ensure they contain at least `c_user` and `xs`\\.", parse_mode='MarkdownV2')
+                await send_telegram_message(update, "❌ Invalid cookies\\. Please ensure they contain at least `c_user` and `xs`\\.", parse_mode='MarkdownV2')
                 logger.warning(f"User {user_id} provided invalid cookies format.")
         except Exception as e:
-            await send_telegram_message(update, f"❌ *An error occurred while parsing cookies:* `{escape_markdown(str(e), version=2)}`\\. Please ensure the format is correct\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ An error occurred while parsing cookies: {escape_markdown(str(e), version=2)}\\. Please ensure the format is correct\\.", parse_mode='MarkdownV2')
             logger.error(f"Error parsing cookies for user {user_id}: {e}")
     else:
-        await send_telegram_message(update, "❌ *No cookies provided\\.* Please send them as a single line\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ No cookies provided\\. Please send them as a single line\\.", parse_mode='MarkdownV2')
         logger.warning(f"User {user_id} sent empty message for cookies.")
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1017,15 +1014,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
         
         if not user_data['subscription_end_date'] or user_data['subscription_end_date'] < date.today():
-            await send_telegram_message(update, "❌ *Your subscription is inactive or expired\\!* Please contact the admin to activate it\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Your subscription is inactive or expired\\. Please contact the admin to activate it\\.", parse_mode='MarkdownV2')
             return
 
         if user_id not in user_cookies_storage or not user_cookies_storage[user_id]:
-            await send_telegram_message(update, "❌ *Your cookies are not saved\\.* Please send them first as a text message\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Your cookies are not saved\\. Please send them first as a text message\\.", parse_mode='MarkdownV2')
             return
 
         update_user_status(user_id, 'running')
-        await send_telegram_message(update, "🚀 *Starting business creation process...*", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'running'))
+        await send_telegram_message(update, "🚀 Starting business creation process\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'running'))
         # Start the creation loop in a non-blocking way
         task = context.application.create_task(create_business_loop(update, context))
         user_tasks[user_id] = task # Store the task to be able to cancel it
@@ -1038,7 +1035,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         update_user_status(user_id, 'paused')
         if user_id in user_tasks and not user_tasks[user_id].done():
             user_tasks[user_id].cancel()
-            await send_telegram_message(update, "⏸️ *Business creation process paused\\.*", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'paused'))
+            await send_telegram_message(update, "⏸️ Business creation process paused\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'paused'))
         else:
             await send_telegram_message(update, "Bot is not actively running to be paused\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'paused'))
 
@@ -1048,7 +1045,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
         
         update_user_status(user_id, 'running')
-        await send_telegram_message(update, "▶️ *Resuming business creation process...*", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'running'))
+        await send_telegram_message(update, "▶️ Resuming business creation process\\.", parse_mode='MarkdownV2', reply_markup=await get_main_keyboard(user_id, 'running'))
         task = context.application.create_task(create_business_loop(update, context))
         user_tasks[user_id] = task
 
@@ -1064,7 +1061,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         file_name = f"invitations_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
-        await send_telegram_message(update, "✅ *Invitations file sent successfully\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "✅ Invitations file sent successfully\\.", parse_mode='MarkdownV2')
 
     elif action == "download_ids":
         businesses = get_user_businesses(user_id)
@@ -1078,7 +1075,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         file_name = f"business_ids_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         await context.bot.send_document(chat_id=user_id, document=file_content.encode('utf-8'), filename=file_name)
-        await send_telegram_message(update, "✅ *Business IDs file sent successfully\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "✅ Business IDs file sent successfully\\.", parse_mode='MarkdownV2')
 
     elif action == "refresh_panel":
         await send_user_panel(update, context)
@@ -1095,7 +1092,7 @@ async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[
     user_data = get_user(user_id)
 
     if not user_data or not user_data.get("tempmail_api_key"):
-        await send_telegram_message(update, "❌ *Please set your TempMail API key first\\.* Contact the admin or use the /set\\_tempmail\\_api\\_key command if available to you\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Please set your TempMail API key first\\. Contact the admin or use the /set_tempmail_api_key command if available to you\\.", parse_mode='MarkdownV2')
         return None, None
 
     api_key = user_data["tempmail_api_key"]
@@ -1115,7 +1112,7 @@ async def get_or_create_daily_temp_email(user_id: int, update: Update) -> tuple[
             update_user_tempmail_config(user_id, email=new_email, email_date=today, uuids=set())
             return new_email, api_key
         else:
-            await send_telegram_message(update, "❌ *Failed to create a new temporary email address\\.* Please check your TempMail API key or try again later\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Failed to create a new temporary email address\\. Please check your TempMail API key or try again later\\.", parse_mode='MarkdownV2')
             return None, None
 
 async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1129,7 +1126,7 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
         return # Stop if not explicitly running
 
     if user_id not in user_cookies_storage or not user_cookies_storage[user_id]:
-        await send_telegram_message(update, "❌ *Your cookies are not saved\\.* Please send them first as a text message\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Your cookies are not saved\\. Please send them first as a text message\\.", parse_mode='MarkdownV2')
         update_user_status(user_id, 'idle')
         await send_user_panel(update, context)
         return
@@ -1150,13 +1147,13 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Check subscription validity
         if not user_data['subscription_end_date'] or user_data['subscription_end_date'] < date.today():
-            await send_telegram_message(update, "❌ *Your subscription has expired\\!* Business creation process stopped\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, "❌ Your subscription has expired\\. Business creation process stopped\\.", parse_mode='MarkdownV2')
             update_user_status(user_id, 'idle')
             await send_user_panel(update, context)
             break # Exit the loop
 
         current_businesses_count = user_data['businesses_created_count'] + 1
-        await send_telegram_message(update, f"🚀 *Attempting to create Business* \\#{current_businesses_count}\\.\\.\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"🚀 Attempting to create Business \\#{current_businesses_count}\\.\\.\\.", parse_mode='MarkdownV2')
         logger.info(f"User {user_id}: Starting creation for Business #{current_businesses_count}")
 
         max_retries_per_business = 3
@@ -1164,7 +1161,7 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
         
         current_biz_attempt_success = False
         for attempt in range(1, max_retries_per_business + 1):
-            await send_telegram_message(update, f"⏳ *Business* \\#{current_businesses_count}: *Creation attempt* {attempt}/{max_retries_per_business}\\.\\.\\.", parse_mode='MarkdownV2', silent=True)
+            await send_telegram_message(update, f"⏳ Business \\#{current_businesses_count}: Creation attempt {attempt}/{max_retries_per_business}\\.\\.\\.", parse_mode='MarkdownV2', silent=True)
             logger.info(f"User {user_id}: Business #{current_businesses_count}, creation attempt {attempt}")
 
             success, biz_id, invitation_link, error_message = await create_facebook_business(
@@ -1172,7 +1169,7 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
             )
 
             if success == "LIMIT_REACHED":
-                await send_telegram_message(update, "🛑 *Facebook business creation limit reached for these cookies\\!* Stopping further attempts\\.", parse_mode='MarkdownV2')
+                await send_telegram_message(update, "🛑 Facebook business creation limit reached for these cookies\\! Stopping further attempts\\.", parse_mode='MarkdownV2')
                 logger.info(f"User {user_id}: Business creation limit reached. Total created: {user_data['businesses_created_count']}")
                 update_user_status(user_id, 'idle')
                 await send_user_panel(update, context)
@@ -1181,15 +1178,12 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
                 save_user_business(user_id, biz_id, invitation_link)
                 increment_businesses_created_count(user_id)
                 
-                # Create a button for the invitation link
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 View Invitation Link", url=invitation_link)]])
-                
                 message = (
-                    f"🎉 *Business created successfully\\!* 🎉\n"
-                    f"📊 *Business ID:* `{escape_markdown(biz_id, version=2)}`\n"
-                    f"✨ _You can access the invitation via the button below\\._"
+                    f"🎉 Business created successfully\\!\n"
+                    f"📊 \\*Business ID:\\* `{escape_markdown(biz_id, version=2)}`\n"
+                    f"🔗 \\*Invitation Link:\\* {escape_markdown(invitation_link, version=2)}"
                 )
-                await send_telegram_message(update, message, parse_mode='MarkdownV2', reply_markup=keyboard)
+                await send_telegram_message(update, message, parse_mode='MarkdownV2')
                 logger.info(f"User {user_id}: Business #{current_businesses_count} created successfully on attempt {attempt}.")
                 current_biz_attempt_success = True
                 break # Break from inner retry loop, move to next business
@@ -1199,39 +1193,36 @@ async def create_business_loop(update: Update, context: ContextTypes.DEFAULT_TYP
                 if attempt < max_retries_per_business:
                     delay = initial_delay * (2 ** (attempt - 1)) # Exponential backoff
                     await send_telegram_message(update, 
-                        f"❌ *Business* \\#{current_businesses_count}: *Creation failed on attempt* {attempt}\\. Reason: `{escape_markdown(error_message, version=2)}`\n"
-                        f"_Retrying in {delay} seconds..._", parse_mode='MarkdownV2'
+                        f"❌ Business \\#{current_businesses_count}: Creation failed on attempt {attempt}\\. Reason: {escape_markdown(error_message, version=2)}\n"
+                        f"Retrying in {delay} seconds\\.\\.\\.", parse_mode='MarkdownV2'
                     )
                     time.sleep(delay)
                 else:
                     final_error_message = (
-                        f"❌ *Business* \\#{current_businesses_count}: *All* {max_retries_per_business} *attempts failed\\.*\n"
-                        f"Last error: `{escape_markdown(error_message, version=2)}`"
+                        f"❌ Business \\#{current_businesses_count}: All {max_retries_per_business} attempts failed\\.\n"
+                        f"Last error: {escape_markdown(error_message, version=2)}"
                     )
                     if biz_id:
-                        final_error_message += f"\n📊 *Partial Business ID:* `{escape_markdown(biz_id, version=2)}`"
+                        final_error_message += f"\n📊 \\*Partial Business ID:\\* `{escape_markdown(biz_id, version=2)}`"
                     await send_telegram_message(update, final_error_message, parse_mode='MarkdownV2')
                     logger.error(f"User {user_id}: Business #{current_businesses_count}: All attempts failed. Final error: {error_message}")
         
         if not current_biz_attempt_success:
-            await send_telegram_message(update, f"⚠️ *Business* \\#{current_businesses_count} *could not be created after multiple retries\\.* Moving to next business attempt\\.", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"⚠️ Business \\#{current_businesses_count} could not be created after multiple retries\\. Moving to next business attempt\\.", parse_mode='MarkdownV2')
             time.sleep(random.randint(10, 20))
         else:
-            await send_telegram_message(update, f"✅ *Business* \\#{current_businesses_count} *created\\.* _Waiting a bit before next attempt..._", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"✅ Business \\#{current_businesses_count} created\\. Waiting a bit before next attempt\\.\\.\\.", parse_mode='MarkdownV2')
             time.sleep(random.randint(5, 15))
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a help message."""
     await send_telegram_message(update,
-        "📚 *Bot Help: Facebook Business Manager Creation*\n\n"
-        "I am a bot designed to help you create *Facebook Business Manager* accounts easily\\.\n\n"
-        "*Steps:*\n"
-        "1\\. Send me your *Facebook cookies* as a single line of text\\.\n"
-        "2\\. Press the \"*Start New Session*\" button in the control panel\\.\n\n"
-        "💡 *Important Notes:*\n"
-        "\\- The process might take a few minutes per business and includes retries for robustness\\.\n"
-        "\\- If you need to set your TempMail API key, please contact the admin\\.\n"
-        "\\- Ensure your cookies are valid and active to avoid any issues\\."
+        "I am a bot for creating Facebook Business Manager accounts\\.\n\n"
+        "Steps:\n"
+        "1\\. Send me your Facebook cookies as a single line of text\\.\n"
+        "2\\. Press the \"Start New Session\" button in the control panel\\.\n\n"
+        "Note: The process might take a few minutes per business and includes retries for robustness\\."
+        "If you need to set your TempMail API key, please contact the admin\\."
         , parse_mode='MarkdownV2'
     )
 
@@ -1241,7 +1232,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_data = get_user(user_id)
 
     if not user_data or not user_data['is_admin']:
-        await send_telegram_message(update, "❌ *You do not have admin privileges to access this panel\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ You do not have admin privileges to access this panel\\.", parse_mode='MarkdownV2')
         return
 
     await send_admin_panel(update, context)
@@ -1257,20 +1248,20 @@ async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     end_index = start_index + users_per_page
     users_on_page = users[start_index:end_index]
 
-    message_text = f"👑 *Admin Control Panel* \\(Users: {total_users}\\)\n\n"
+    message_text = f"Admin Control Panel \\(Users: {total_users}\\)\n\n"
     if not users_on_page:
         message_text += "No users to display\\."
     else:
         for user_info in users_on_page: # Renamed 'user' to 'user_info' to avoid conflict
-            sub_status = "Inactive 🔴"
+            sub_status = "Inactive"
             if user_info['subscription_end_date']:
                 if user_info['subscription_end_date'] >= date.today():
                     days_left = (user_info['subscription_end_date'] - date.today()).days
-                    sub_status = f"Active ✅ ({days_left} days)"
+                    sub_status = f"Active \\({days_left} days\\)"
                 else:
-                    sub_status = "Expired ❌"
+                    sub_status = "Expired"
             
-            admin_status = " (Admin 👑)" if user_info['is_admin'] else ""
+            admin_status = " \\(Admin\\)" if user_info['is_admin'] else ""
             message_text += (
                 f"\\- ID: `{user_info['user_id']}` {admin_status}\n"
                 f"  Subscription: {sub_status}\n"
@@ -1283,7 +1274,7 @@ async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, u
         [InlineKeyboardButton("➕ Activate Subscription", callback_data="admin_activate_sub")],
         [InlineKeyboardButton("🔑 Set TempMail API", callback_data="admin_set_tempmail_api")],
         [InlineKeyboardButton("📊 General Stats", callback_data="admin_stats")],
-        [InlineKeyboardButton("🔄 Refresh Panel", callback_data="admin_refresh_panel")]
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_refresh_panel")]
     ]
 
     # Pagination buttons
@@ -1306,16 +1297,16 @@ async def admin_callback_query(update: Update, context: ContextTypes.DEFAULT_TYP
     user_data = get_user(user_id)
 
     if not user_data or not user_data['is_admin']:
-        await send_telegram_message(update, "❌ *You do not have admin privileges\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ You do not have admin privileges\\.", parse_mode='MarkdownV2')
         return
 
     action = query.data
 
     if action == "admin_activate_sub":
-        await send_telegram_message(update, "To activate subscription, send command in format:\n`/activate_sub <user_id> <days>`\n*Example:* `/activate_sub 123456789 30` (for 30 days)", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "To activate subscription, send command in format:\n`/activate_sub <user_id> <days>`\nExample: `/activate_sub 123456789 30` (for 30 days)", parse_mode='MarkdownV2')
     
     elif action == "admin_set_tempmail_api":
-        await send_telegram_message(update, "To set TempMail API key for a user, send command in format:\n`/set_user_tempmail_api <user_id> <api_key>`\n*Example:* `/set_user_tempmail_api 123456789 131|nLYDwolNM8987MZX7s0At3muNsbK7S7tJ3nKrrvu1677734a`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "To set TempMail API key for a user, send command in format:\n`/set_user_tempmail_api <user_id> <api_key>`\nExample: `/set_user_tempmail_api 123456789 131|nLYDwolNM8987MZX7s0At3muNsbK7S7tJ3nKrrvu1677734a`", parse_mode='MarkdownV2')
 
     elif action == "admin_stats":
         total_users = len(get_all_users())
@@ -1338,7 +1329,7 @@ async def admin_callback_query(update: Update, context: ContextTypes.DEFAULT_TYP
             await send_telegram_message(update, message, parse_mode='MarkdownV2')
         except Exception as e:
             logger.error(f"Error getting admin stats: {e}")
-            await send_telegram_message(update, f"❌ *Error fetching statistics:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+            await send_telegram_message(update, f"❌ Error fetching statistics: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
         finally:
             if conn:
                 release_db_connection(conn)
@@ -1354,11 +1345,11 @@ async def activate_subscription_command(update: Update, context: ContextTypes.DE
     """Admin command to activate user subscription."""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        await send_telegram_message(update, "❌ *You do not have admin privileges\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ You do not have admin privileges\\.", parse_mode='MarkdownV2')
         return
 
     if len(context.args) != 2:
-        await send_telegram_message(update, "❌ *Incorrect usage\\.* Correct format: `/activate_sub <user_id> <days>`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Incorrect usage\\. Correct format: `/activate_sub <user_id> <days>`", parse_mode='MarkdownV2')
         return
 
     try:
@@ -1378,28 +1369,28 @@ async def activate_subscription_command(update: Update, context: ContextTypes.DE
         new_end_date = current_end_date + timedelta(days=days)
         
         create_or_update_user(target_user_id, subscription_end_date=new_end_date)
-        await send_telegram_message(update, f"✅ *Subscription activated for user* `{target_user_id}` *until* `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"✅ Subscription activated for user `{target_user_id}` until `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
         # Notify target user
         try:
-            await context.bot.send_message(chat_id=target_user_id, text=f"🎉 *Your subscription has been activated successfully until* `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
+            await context.bot.send_message(chat_id=target_user_id, text=f"🎉 Your subscription has been activated successfully until `{new_end_date.strftime('%Y-%m-%d')}`\\.", parse_mode='MarkdownV2')
         except Exception as e:
             logger.warning(f"Could not notify user {target_user_id} about subscription activation: {e}")
 
     except ValueError:
-        await send_telegram_message(update, "❌ *Invalid user ID or number of days\\.* Please enter valid numbers\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Invalid user ID or number of days\\. Please enter valid numbers\\.", parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"Error activating subscription: {e}")
-        await send_telegram_message(update, f"❌ *Error activating subscription:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Error activating subscription: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
 
 async def set_user_tempmail_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin command to set TempMail API key for a user."""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        await send_telegram_message(update, "❌ *You do not have admin privileges\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ You do not have admin privileges\\.", parse_mode='MarkdownV2')
         return
 
     if len(context.args) != 2:
-        await send_telegram_message(update, "❌ *Incorrect usage\\.* Correct format: `/set_user_tempmail_api <user_id> <api_key>`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Incorrect usage\\. Correct format: `/set_user_tempmail_api <user_id> <api_key>`", parse_mode='MarkdownV2')
         return
 
     try:
@@ -1412,18 +1403,18 @@ async def set_user_tempmail_api_command(update: Update, context: ContextTypes.DE
             create_or_update_user(target_user_id)
             
         update_user_tempmail_config(target_user_id, api_key=api_key)
-        await send_telegram_message(update, f"✅ *TempMail API key set for user* `{target_user_id}` *successfully\\.*", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"✅ TempMail API key set for user `{target_user_id}` successfully\\.", parse_mode='MarkdownV2')
         # Notify target user
         try:
-            await context.bot.send_message(chat_id=target_user_id, text="🎉 *Your TempMail API key has been set successfully\\.*", parse_mode='MarkdownV2')
+            await context.bot.send_message(chat_id=target_user_id, text="🎉 Your TempMail API key has been set successfully\\.", parse_mode='MarkdownV2')
         except Exception as e:
             logger.warning(f"Could not notify user {target_user_id} about API key setting: {e}")
 
     except ValueError:
-        await send_telegram_message(update, "❌ *Invalid user ID\\.* Please enter a valid number\\.", parse_mode='MarkdownV2')
+        await send_telegram_message(update, "❌ Invalid user ID\\. Please enter a valid number\\.", parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"Error setting user TempMail API key: {e}")
-        await send_telegram_message(update, f"❌ *Error setting user TempMail API key:* `{escape_markdown(str(e), version=2)}`", parse_mode='MarkdownV2')
+        await send_telegram_message(update, f"❌ Error setting user TempMail API key: {escape_markdown(str(e), version=2)}", parse_mode='MarkdownV2')
 
 async def error_handler(update: object, context: CallbackContext) -> None:
     """Log the error and send a telegram message to notify the user."""
@@ -1435,7 +1426,7 @@ async def error_handler(update: object, context: CallbackContext) -> None:
     escaped_error_message = escape_markdown(str(context.error), version=2)
     
     message = (
-        "⚠️ *An unexpected error occurred while processing your request\\.* "
+        "An unexpected error occurred while processing your request\\. "
         "The developers have been notified\\.\n\n"
         f"Error: `{escaped_error_message}`"
     )
